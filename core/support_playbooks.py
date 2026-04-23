@@ -1,18 +1,18 @@
 """
 support_playbooks.py
-Núcleo conductual de NeuroGuIA.
+Catalogo conductual principal de NeuroGuIA.
 
 Objetivo:
-- Proveer rutas claras, humanas y consistentes para acompañamiento.
-- Evitar improvisación caótica en situaciones frecuentes.
-- Permitir que otra capa (LLM o renderer) reformule con calidez,
-  pero SIN cambiar la intención, la seguridad ni la ruta base.
+- centralizar rutas y subrutas con nombres explicitos
+- mantener respuestas concretas, breves y calidas
+- dejar que otra capa humanice el texto sin cambiar la ruta
 """
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Literal
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 
 # =========================================================
@@ -24,6 +24,7 @@ Domain = Literal[
     "ansiedad",
     "bloqueo_ejecutivo",
     "sueno",
+    "apoyo_infancia_neurodivergente",
     "sobrecarga_cuidador",
     "pregunta_simple",
     "meta_question",
@@ -63,7 +64,8 @@ OutcomePolarity = Literal[
 
 @dataclass
 class UserSignal:
-    """Señales ya detectadas por capas anteriores o inferidas localmente."""
+    """Senales detectadas por capas anteriores o inferidas localmente."""
+
     domain: Domain
     turn_family: TurnFamily
     outcome: OutcomePolarity = "unknown"
@@ -78,14 +80,16 @@ class UserSignal:
     wants_to_pause: bool = False
     wants_to_continue: bool = False
     mentions_risk: bool = False
+    active_subroute: Optional[str] = None
 
 
 @dataclass
 class ResponsePlan:
     """
     Plan conductual base.
-    Luego el LLM o renderer puede reformularlo, pero no cambiar su intención.
+    El renderer o el LLM pueden humanizarlo, pero no cambiar su ruta.
     """
+
     goal: str
     tone: str
     validation: str
@@ -97,6 +101,10 @@ class ResponsePlan:
     safety_note: Optional[str] = None
     close_softly: bool = False
     needs_professional_redirect: bool = False
+    route_id: Optional[Domain] = None
+    subroute_id: Optional[str] = None
+    state_subroute_id: Optional[str] = None
+    humanization_required: bool = True
     tags: List[str] = field(default_factory=list)
 
 
@@ -114,52 +122,235 @@ class PlaybookSpec:
 
 
 # =========================================================
+# Catalogo
+# =========================================================
+
+PLAYBOOK_CATALOG: Dict[Domain, Tuple[str, ...]] = {
+    "crisis": (
+        "crisis_initial",
+        "crisis_first_step",
+        "crisis_demand_examples",
+        "crisis_literal_phrase",
+        "crisis_check_effect",
+        "crisis_close_temporarily",
+    ),
+    "ansiedad": (
+        "anxiety_initial_grounding",
+        "anxiety_visible_action",
+        "anxiety_binary_decision",
+        "anxiety_change_modality",
+        "anxiety_hold_after_partial_relief",
+        "anxiety_repair_after_rejection",
+    ),
+    "bloqueo_ejecutivo": (
+        "executive_initial",
+        "executive_no_se_que_toca",
+        "executive_linea_de_que",
+        "executive_no_entiendo",
+        "executive_no_puedo_empezar",
+        "executive_visible_next_step",
+        "executive_decide_for_user",
+    ),
+    "sueno": (
+        "sleep_initial",
+        "sleep_mind_racing",
+        "sleep_body_activated",
+        "sleep_environment",
+        "sleep_insomnia",
+        "sleep_followup",
+        "sleep_medication_boundary",
+    ),
+    "apoyo_infancia_neurodivergente": (
+        "child_overthinking_support",
+        "child_saturation_support",
+        "child_co_regulation",
+        "child_clear_communication",
+        "child_reduce_stimuli",
+        "child_anticipation_routines",
+        "child_social_or_family_context",
+    ),
+    "sobrecarga_cuidador": (
+        "caregiver_validation",
+        "caregiver_reduce_load",
+        "caregiver_ask_for_help",
+        "caregiver_single_priority",
+        "caregiver_self_care_without_guilt",
+    ),
+    "meta_question": (
+        "who_are_you",
+        "how_can_i_call_you",
+        "can_i_talk_to_you",
+        "what_can_you_do",
+    ),
+    "meditacion_guiada": (
+        "one_minute_breath",
+        "grounding_5_senses",
+        "pause_guided",
+    ),
+    "rechazo_estrategia": (
+        "strategy_repair",
+        "strategy_switch",
+    ),
+    "clarificacion": (
+        "what_phrase",
+        "what_type",
+        "where_do_i_start",
+        "i_dont_understand",
+    ),
+    "cierre": (
+        "pause_here",
+        "enough_for_now",
+    ),
+}
+
+
+def get_catalog_subroutes(route_id: Domain) -> Tuple[str, ...]:
+    return PLAYBOOK_CATALOG.get(route_id, ())
+
+
+# =========================================================
 # Utilidades
 # =========================================================
 
 def normalize_text(text: str) -> str:
-    return " ".join((text or "").strip().lower().split())
+    normalized = unicodedata.normalize("NFKD", str(text or "").strip().lower())
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    return " ".join(normalized.split())
 
 
 def contains_any(text: str, phrases: Sequence[str]) -> bool:
     t = normalize_text(text)
-    return any(p in t for p in phrases)
+    return any(normalize_text(phrase) in t for phrase in phrases)
+
+
+def _has_any(normalized_text: str, phrases: Sequence[str]) -> bool:
+    return any(normalize_text(phrase) in normalized_text for phrase in phrases)
+
+
+def _text(signal: UserSignal) -> str:
+    return normalize_text(signal.user_text)
+
+
+def _active_subroute(signal: UserSignal) -> str:
+    return normalize_text(signal.active_subroute or "")
+
+
+def _dedupe(items: Sequence[str]) -> List[str]:
+    seen: List[str] = []
+    for item in items:
+        cleaned = str(item or "").strip()
+        if cleaned and cleaned not in seen:
+            seen.append(cleaned)
+    return seen
+
+
+def _plan(
+    route_id: Domain,
+    subroute_id: Optional[str],
+    *,
+    goal: Optional[str] = None,
+    tone: str,
+    validation: str,
+    main_response: str,
+    optional_followup: Optional[str] = None,
+    next_step: Optional[str] = None,
+    literal_phrase: Optional[str] = None,
+    micro_practice: Optional[str] = None,
+    safety_note: Optional[str] = None,
+    close_softly: bool = False,
+    needs_professional_redirect: bool = False,
+    state_subroute_id: Optional[str] = None,
+    humanization_required: bool = True,
+    tags: Optional[List[str]] = None,
+) -> ResponsePlan:
+    merged_tags = _dedupe(
+        [
+            route_id,
+            subroute_id or "",
+            *(tags or []),
+        ]
+    )
+    return ResponsePlan(
+        goal=goal or subroute_id or "support_step",
+        tone=tone,
+        validation=validation,
+        main_response=main_response,
+        optional_followup=optional_followup,
+        next_step=next_step,
+        literal_phrase=literal_phrase,
+        micro_practice=micro_practice,
+        safety_note=safety_note,
+        close_softly=close_softly,
+        needs_professional_redirect=needs_professional_redirect,
+        route_id=route_id,
+        subroute_id=subroute_id,
+        state_subroute_id=state_subroute_id or subroute_id,
+        humanization_required=humanization_required,
+        tags=merged_tags,
+    )
 
 
 # =========================================================
-# Interceptores críticos de seguridad / límites
+# Interceptores criticos de seguridad / limites
 # =========================================================
 
 MED_REQUEST_MARKERS = [
-    "pastilla", "pastillas", "medicina", "medicamento", "medicamentos",
-    "dosis", "que tomo", "qué tomo", "que me tomo", "qué me tomo",
-    "que pastilla", "qué pastilla", "que me recomiendas tomar",
-    "qué me recomiendas tomar", "recetame", "recétame",
-    "algo para dormir", "algo para calmarme", "algo para la ansiedad",
-    "que le doy", "qué le doy", "que le puedo dar", "qué le puedo dar",
+    "pastilla",
+    "pastillas",
+    "medicina",
+    "medicamento",
+    "medicamentos",
+    "dosis",
+    "que tomo",
+    "que me tomo",
+    "que pastilla",
+    "que me recomiendas tomar",
+    "recetame",
+    "algo para dormir",
+    "algo para calmarme",
+    "algo para la ansiedad",
+    "que le doy",
+    "que le puedo dar",
 ]
 
 HIGH_RISK_MARKERS = [
-    "quiero morirme", "me quiero morir", "hacerme daño", "hacerme dano",
-    "lastimarme", "lastimarlo", "lastimarla", "suicid", "matarme",
-    "matarlo", "matarla", "no puedo mantenerlo seguro", "no puedo mantenerla segura",
+    "quiero morirme",
+    "me quiero morir",
+    "hacerme dano",
+    "lastimarme",
+    "lastimarlo",
+    "lastimarla",
+    "suicid",
+    "matarme",
+    "matarlo",
+    "matarla",
+    "no puedo mantenerlo seguro",
+    "no puedo mantenerla segura",
 ]
 
 
 def intercept_medication_request(signal: UserSignal) -> Optional[ResponsePlan]:
     if signal.asks_for_meds or contains_any(signal.user_text, MED_REQUEST_MARKERS):
-        return ResponsePlan(
+        route_id: Domain = signal.domain if signal.domain in PLAYBOOK_CATALOG else "general"
+        subroute_id = "sleep_medication_boundary" if signal.domain == "sueno" else None
+        optional_followup = (
+            "Si quieres, te dejo una medida no farmacologica para esta noche."
+            if signal.domain == "sueno"
+            else "Si quieres, si puedo ayudarte con una medida sencilla y no farmacologica para este momento."
+        )
+        return _plan(
+            route_id=route_id,
+            subroute_id=subroute_id,
             goal="safe_medication_boundary",
             tone="calido_claro_seguro",
-            validation="Entiendo que estás buscando algo que ayude ya.",
+            validation="Entiendo que buscas algo que ayude ya.",
             main_response=(
-                "No puedo decirte qué pastilla tomar ni recomendar medicamentos o dosis. "
-                "Si esto te está afectando mucho, lo más seguro es consultarlo con un profesional de salud."
+                "No puedo decirte que medicamento tomar ni recomendar dosis. "
+                "Si esto te esta pegando fuerte, lo mas seguro es consultarlo con un profesional de salud."
             ),
-            optional_followup=(
-                "Si quieres, sí puedo ayudarte con una medida no farmacológica sencilla para esta noche o este momento."
-            ),
+            optional_followup=optional_followup,
             needs_professional_redirect=True,
+            state_subroute_id=signal.active_subroute,
             tags=["safety", "medication_boundary"],
         )
     return None
@@ -167,573 +358,1326 @@ def intercept_medication_request(signal: UserSignal) -> Optional[ResponsePlan]:
 
 def intercept_high_risk(signal: UserSignal) -> Optional[ResponsePlan]:
     if signal.mentions_risk or contains_any(signal.user_text, HIGH_RISK_MARKERS):
-        return ResponsePlan(
+        route_id: Domain = signal.domain if signal.domain in PLAYBOOK_CATALOG else "general"
+        return _plan(
+            route_id=route_id,
+            subroute_id=None,
             goal="high_risk_redirect",
             tone="calido_firme_seguro",
-            validation="Gracias por decirlo. Esto no conviene cargarlo sola/o.",
+            validation="Gracias por decirlo. No conviene que te quedes sola/o con esto.",
             main_response=(
-                "Ahora lo importante es la seguridad inmediata. Busca apoyo presencial o de emergencia "
-                "cerca de ti en este momento. Si hay alguien contigo o a quien puedas llamar, hazlo ya."
+                "Ahora mismo lo importante es la seguridad inmediata. Busca apoyo presencial o de emergencia cerca de ti ya. "
+                "Si hay alguien contigo o a quien puedas llamar, hazlo en este momento."
             ),
             optional_followup=(
-                "Mientras llega apoyo, aléjate de objetos peligrosos y trata de no quedarte sola/o si puedes."
+                "Mientras llega apoyo, alejate de objetos peligrosos y no te quedes sola/o si puedes evitarlo."
             ),
             safety_note="prioridad_seguridad_inmediata",
             needs_professional_redirect=True,
+            state_subroute_id=signal.active_subroute,
             tags=["safety", "high_risk"],
         )
     return None
 
 
 # =========================================================
-# Playbooks específicos
+# Detectores de subrutas
+# =========================================================
+
+def _sleep_track(signal: UserSignal) -> str:
+    text = _text(signal)
+    active = _active_subroute(signal)
+    if _has_any(
+        text,
+        [
+            "mente acelerada",
+            "cabeza acelerada",
+            "pensando mucho",
+            "no apago la mente",
+            "la mente no se calla",
+        ],
+    ):
+        return "sleep_mind_racing"
+    if _has_any(
+        text,
+        [
+            "cuerpo activado",
+            "cuerpo inquieto",
+            "corazon acelerado",
+            "palpitaciones",
+            "muy activada",
+            "muy activado",
+        ],
+    ):
+        return "sleep_body_activated"
+    if _has_any(text, ["ruido", "luz", "pantalla", "calor", "frio", "entorno", "ambiente", "temperatura"]):
+        return "sleep_environment"
+    if _has_any(
+        text,
+        [
+            "desvelo",
+            "insomnio",
+            "no puedo dormir",
+            "me cuesta dormir",
+            "llevo horas despierta",
+            "llevo horas despierto",
+            "me desperte",
+            "me desperte a media noche",
+            "me desperte en la madrugada",
+            "ya me desperte",
+        ],
+    ):
+        return "sleep_insomnia"
+    if active in {
+        "sleep_mind_racing",
+        "sleep_body_activated",
+        "sleep_environment",
+        "sleep_insomnia",
+    }:
+        return active
+    return "sleep_initial"
+
+
+def _block_track(signal: UserSignal) -> str:
+    text = _text(signal)
+    active = _active_subroute(signal)
+    if _has_any(text, ["linea de que", "que linea", "que pongo", "que escribo primero"]):
+        return "executive_linea_de_que"
+    if _has_any(text, ["no se que toca", "no se que sigue", "no se que hacer"]):
+        return "executive_no_se_que_toca"
+    if _has_any(text, ["no entiendo", "no le entiendo", "no entiendo la tarea", "no entiendo la consigna"]):
+        return "executive_no_entiendo"
+    if _has_any(text, ["no puedo empezar", "no puedo arrancar", "no puedo iniciar", "no puedo ni empezar"]):
+        return "executive_no_puedo_empezar"
+    if _has_any(text, ["decide tu", "elige tu", "escoge tu", "tu dime", "yo no quiero elegir"]):
+        return "executive_decide_for_user"
+    if active in set(PLAYBOOK_CATALOG["bloqueo_ejecutivo"]):
+        return active
+    return "executive_initial"
+
+
+def _child_support_track(signal: UserSignal) -> str:
+    text = _text(signal)
+    active = _active_subroute(signal)
+    if _has_any(text, ["escuela", "maestra", "maestro", "familia", "hermano", "hermana", "visita", "social"]):
+        return "child_social_or_family_context"
+    if _has_any(text, ["sobrepiensa", "sobrepensamiento", "le da muchas vueltas", "piensa demasiado"]):
+        return "child_overthinking_support"
+    if _has_any(text, ["saturacion", "se satura", "sobrecarga", "demasiado estimulo", "demasiado ruido"]):
+        return "child_saturation_support"
+    if _has_any(text, ["como le digo", "como le hablo", "que le digo", "que le puedo decir", "frase"]):
+        return "child_clear_communication"
+    if _has_any(text, ["estimulos", "ruido", "luz", "pantalla", "ambiente", "entorno"]):
+        return "child_reduce_stimuli"
+    if _has_any(text, ["rutina", "anticipacion", "transicion", "cambio", "preparar antes", "avisarle antes"]):
+        return "child_anticipation_routines"
+    if active in set(PLAYBOOK_CATALOG["apoyo_infancia_neurodivergente"]):
+        return active
+    return "child_co_regulation"
+
+
+def _caregiver_track(signal: UserSignal) -> str:
+    text = _text(signal)
+    active = _active_subroute(signal)
+    if _has_any(text, ["culpa", "me siento mal por descansar", "no deberia parar", "descansar"]):
+        return "caregiver_self_care_without_guilt"
+    if _has_any(text, ["nadie me ayuda", "estoy sola", "estoy solo", "no tengo apoyo", "necesito ayuda"]):
+        return "caregiver_ask_for_help"
+    if _has_any(text, ["no se que soltar", "todo me cae a mi", "todo depende de mi", "todo me toca"]):
+        return "caregiver_reduce_load"
+    if _has_any(text, ["que hago primero", "que priorizo", "que atiendo primero", "no se por donde"]):
+        return "caregiver_single_priority"
+    if active in set(PLAYBOOK_CATALOG["sobrecarga_cuidador"]):
+        return active
+    return "caregiver_validation"
+
+
+def _meditation_track(signal: UserSignal) -> str:
+    text = _text(signal)
+    active = _active_subroute(signal)
+    if _has_any(text, ["respiracion", "respirar", "un minuto", "1 minuto"]):
+        return "one_minute_breath"
+    if _has_any(text, ["5 sentidos", "cinco sentidos", "grounding", "aterrizar", "volver aqui"]):
+        return "grounding_5_senses"
+    if active in set(PLAYBOOK_CATALOG["meditacion_guiada"]):
+        return active
+    return "pause_guided"
+
+
+def _rejection_track(signal: UserSignal) -> str:
+    text = _text(signal)
+    active = _active_subroute(signal)
+    if _has_any(text, ["no sirves", "no ayudas", "no me ayudas", "me desespera esto", "esto me frustra"]):
+        return "strategy_repair"
+    if active in set(PLAYBOOK_CATALOG["rechazo_estrategia"]):
+        return active
+    return "strategy_switch"
+
+
+def _meta_track(signal: UserSignal) -> str:
+    text = _text(signal)
+    if _has_any(text, ["como puedo llamarte", "como te llamo", "tu nombre"]):
+        return "how_can_i_call_you"
+    if _has_any(text, ["puedo platicar contigo", "puedo hablar contigo", "estas ahi", "estas aqui"]):
+        return "can_i_talk_to_you"
+    if _has_any(text, ["que puedes hacer", "como ayudas", "en que ayudas", "que haces"]):
+        return "what_can_you_do"
+    return "who_are_you"
+
+
+def _clarification_track(signal: UserSignal) -> str:
+    text = _text(signal)
+    active = _active_subroute(signal)
+    if _has_any(text, ["que frase", "que digo", "cual frase", "como se lo digo"]):
+        return "what_phrase"
+    if _has_any(text, ["que tipo", "como cual", "cuales", "ejemplos"]):
+        return "what_type"
+    if _has_any(text, ["por donde", "donde empiezo", "como empiezo", "con que empiezo"]):
+        return "where_do_i_start"
+    if active in set(PLAYBOOK_CATALOG["clarificacion"]):
+        return active
+    return "i_dont_understand"
+
+
+def _close_track(signal: UserSignal) -> str:
+    text = _text(signal)
+    if _has_any(text, ["pausa", "paramos aqui", "por ahora"]):
+        return "pause_here"
+    return "enough_for_now"
+
+
+# =========================================================
+# Playbooks especificos
 # =========================================================
 
 def playbook_meta_question(signal: UserSignal) -> ResponsePlan:
-    text = normalize_text(signal.user_text)
-
-    if "como puedo llamarte" in text or "cómo puedo llamarte" in text:
-        return ResponsePlan(
+    track = _meta_track(signal)
+    if track == "how_can_i_call_you":
+        return _plan(
+            route_id="meta_question",
+            subroute_id=track,
             goal="answer_about_system_briefly",
             tone="calido_humano_directo",
             validation="",
-            main_response="Puedes decirme NeuroGuIA, o como te salga más natural.",
+            main_response="Puedes llamarme NeuroGuIA, o como te salga mas natural.",
             close_softly=True,
             tags=["meta", "identity"],
         )
-
-    if contains_any(text, ["puedo platicar contigo", "puedo hablar contigo"]):
-        return ResponsePlan(
+    if track == "can_i_talk_to_you":
+        return _plan(
+            route_id="meta_question",
+            subroute_id=track,
             goal="answer_about_system_briefly",
             tone="calido_humano_directo",
             validation="",
-            main_response="Sí, claro. Puedes platicar conmigo cuando lo necesites y lo vemos paso a paso.",
+            main_response="Si, claro. Puedes hablar conmigo aqui y lo vemos contigo, paso a paso.",
             close_softly=True,
             tags=["meta", "availability"],
         )
-
-    return ResponsePlan(
+    if track == "what_can_you_do":
+        return _plan(
+            route_id="meta_question",
+            subroute_id=track,
+            goal="answer_about_system_briefly",
+            tone="calido_humano_directo",
+            validation="",
+            main_response=(
+                "Puedo ayudarte a bajar una crisis, aterrizar ansiedad, ordenar un bloqueo, "
+                "pensar el sueno y darte frases o pasos concretos."
+            ),
+            optional_followup="Si quieres, cuentame que esta pesando mas ahorita.",
+            tags=["meta", "capabilities"],
+        )
+    return _plan(
+        route_id="meta_question",
+        subroute_id="who_are_you",
         goal="answer_about_system_briefly",
         tone="calido_humano_directo",
         validation="",
-        main_response=(
-            "Soy NeuroGuIA, un sistema de acompañamiento conversacional pensado para ayudar "
-            "a madres, cuidadores y personas neurodivergentes con orientación clara, apoyo emocional y pasos concretos."
-        ),
-        optional_followup="Si quieres, puedo acompañarte con una duda puntual o con algo que te esté pesando ahora.",
+        main_response="Soy NeuroGuIA. Estoy aqui para acompanar, ordenar lo que esta pasando y ayudarte a encontrar un paso claro cuando haga falta.",
+        optional_followup="Si quieres, cuentame que esta pasando ahorita.",
         tags=["meta", "identity"],
     )
 
 
 def playbook_crisis(signal: UserSignal) -> ResponsePlan:
+    text = _text(signal)
+    active = _active_subroute(signal)
+
     if signal.turn_family == "closure_or_pause" or signal.wants_to_pause:
-        return ResponsePlan(
+        return _plan(
+            route_id="crisis",
+            subroute_id="crisis_close_temporarily",
             goal="pause_after_crisis_step",
             tone="calido_suave",
             validation="Esta bien.",
-            main_response="Podemos parar aqui por ahora. Si vuelve a subir, regresa a una sola frase breve y a bajar estimulos alrededor.",
+            main_response="Por ahora basta. Sosten la frase breve y el entorno mas bajo un momento.",
+            optional_followup="Si vuelve a subir, vuelves aqui y seguimos desde una sola cosa a la vez.",
             close_softly=True,
-            tags=["crisis", "pause"],
-        )
-
-    if signal.turn_family == "clarification_request" or signal.expresses_confusion:
-        return ResponsePlan(
-            goal="clarify_crisis_step",
-            tone="claro_firme",
-            validation="Si, te lo digo mas simple.",
-            main_response="Haz solo una cosa: baja una fuente de ruido, gente o exigencia.",
-            optional_followup="Despues manten una frase breve y no discutas.",
-            tags=["crisis", "clarify"],
+            state_subroute_id=active or "crisis_close_temporarily",
+            tags=["crisis", "cierre_temporal"],
         )
 
     if signal.turn_family == "literal_phrase_request" or signal.asks_for_phrase:
-        return ResponsePlan(
+        return _plan(
+            route_id="crisis",
+            subroute_id="crisis_literal_phrase",
             goal="literal_phrase_for_crisis",
             tone="calido_firme_breve",
             validation="",
             main_response="Puedes decirle esto, tal cual:",
-            literal_phrase="Estoy aquí contigo. No hace falta hablar mucho ahora. Vamos a bajar esto juntos.",
-            optional_followup="Después de decirlo, mantén la frase breve y no agregues más instrucciones al mismo tiempo.",
-            tags=["crisis", "literal_phrase"],
+            literal_phrase="Estoy aqui contigo. No te voy a exigir nada ahora. Vamos a bajar esto juntos.",
+            optional_followup="Dilo con voz baja y sin meter otra instruccion al mismo tiempo.",
+            tags=["crisis", "frase_literal"],
+        )
+
+    if signal.turn_family == "clarification_request" or signal.expresses_confusion:
+        if _has_any(text, ["que tipo", "como cuales", "cuales", "ejemplos"]) or active == "crisis_demand_examples":
+            return _plan(
+                route_id="crisis",
+                subroute_id="crisis_demand_examples",
+                goal="clarify_crisis_examples",
+                tone="claro_firme",
+                validation="Si, te digo ejemplos concretos.",
+                main_response="Baja una sola demanda concreta: menos gente cerca, menos preguntas, menos ruido, menos luz o menos contacto.",
+                optional_followup="Elige solo una y cambia esa primero.",
+                tags=["crisis", "demanda_examples"],
+            )
+        return _plan(
+            route_id="crisis",
+            subroute_id="crisis_first_step",
+            goal="clarify_crisis_step",
+            tone="claro_firme",
+            validation="Si, te lo digo directo.",
+            main_response="Haz primero una sola cosa visible: saca preguntas, baja ruido o aleja gente de alrededor.",
+            next_step="Saca preguntas, baja ruido o aleja gente de alrededor",
+            optional_followup="Cuando eso baje un poco, te doy la frase breve.",
+            tags=["crisis", "primer_paso_concreto"],
         )
 
     if signal.turn_family == "specific_action_request":
-        return ResponsePlan(
+        return _plan(
+            route_id="crisis",
+            subroute_id="crisis_first_step",
             goal="first_concrete_step_in_crisis",
             tone="firme_claro",
             validation="Estoy contigo.",
-            main_response=(
-                "Empieza por una sola cosa: baja una fuente de ruido, exigencia o gente alrededor."
-            ),
-            optional_followup=(
-                "Si eso ya está hecho, mantén distancia segura y evita discutir o razonar en pleno pico."
-            ),
-            tags=["crisis", "first_step"],
+            main_response="Empieza por una sola cosa visible: baja ruido, saca gente o corta las preguntas alrededor.",
+            next_step="Baja ruido, saca gente o corta las preguntas alrededor",
+            optional_followup="Despues usas una frase breve y no discutes.",
+            tags=["crisis", "primer_paso_concreto"],
+        )
+
+    if signal.turn_family == "strategy_rejection":
+        return _plan(
+            route_id="crisis",
+            subroute_id="crisis_first_step",
+            goal="change_modality_after_no_effect_crisis",
+            tone="calido_firme",
+            validation="Entiendo la frustracion. No voy a insistir con algo que no bajo esto.",
+            main_response="Cambiemos rapido: menos palabras, mas espacio seguro y una sola accion del entorno.",
+            next_step="Deja menos palabras y baja una sola demanda del entorno",
+            optional_followup="Si quieres, te doy la frase exacta para hacer ese cambio.",
+            tags=["crisis", "cambio_de_via"],
         )
 
     if signal.turn_family == "followup_acceptance" or signal.asks_for_next_step or signal.wants_to_continue:
-        return ResponsePlan(
-            goal="next_step_after_initial_crisis_containment",
+        if active in {"crisis_initial", "crisis_first_step", "crisis_demand_examples"}:
+            return _plan(
+                route_id="crisis",
+                subroute_id="crisis_literal_phrase",
+                goal="next_step_after_initial_crisis_containment",
+                tone="firme_claro",
+                validation="Si, aqui sigo.",
+                main_response="Ahora sosten una sola frase breve y quedate presente sin discutir.",
+                literal_phrase="Estoy aqui contigo. Primero vamos a bajar esto.",
+                optional_followup="Si no baja nada con eso, cambiamos una sola cosa mas del entorno.",
+                tags=["crisis", "seguimiento"],
+            )
+        return _plan(
+            route_id="crisis",
+            subroute_id="crisis_check_effect",
+            goal="check_effect_or_next_step_crisis",
             tone="firme_claro",
-            validation="Bien, seguimos sin meter demasiadas cosas.",
-            main_response="El siguiente paso es sostener una sola frase breve y mirar si baja un poco la tension.",
-            optional_followup="Si no baja nada, cambiamos una sola cosa mas del entorno.",
-            tags=["crisis", "next_step"],
+            validation="Si, mira solo esto ahora.",
+            main_response="Revisa si hay menos ruido, menos tension o un poco mas de espacio seguro que hace un momento.",
+            optional_followup="Si bajo un poco, sostengan eso. Si no, quitamos una demanda mas.",
+            tags=["crisis", "seguimiento"],
         )
 
     if signal.turn_family == "post_action_followup":
-        return ResponsePlan(
+        return _plan(
+            route_id="crisis",
+            subroute_id="crisis_check_effect",
             goal="check_effect_or_next_step_crisis",
             tone="firme_claro",
             validation="",
-            main_response=(
-                "Ahora mira solo esto: ¿hay menos tensión, menos ruido o más espacio seguro que hace un momento?"
-            ),
-            optional_followup=(
-                "Si bajó un poco, sostén eso y no metas otra indicación todavía. "
-                "Si no bajó nada, cambia solo una cosa más del entorno."
-            ),
-            tags=["crisis", "followup"],
+            main_response="Mira solo esto: hay un poco menos de ruido, menos tension o mas espacio seguro que hace un momento.",
+            optional_followup="Si si, sostengan eso un momento. Si no, quitamos una sola demanda mas.",
+            tags=["crisis", "seguimiento"],
         )
 
     if signal.turn_family == "outcome_report":
-        if signal.outcome == "improved":
-            return ResponsePlan(
+        if signal.outcome in ("partial_relief", "improved"):
+            return _plan(
+                route_id="crisis",
+                subroute_id="crisis_close_temporarily",
                 goal="hold_after_effect_crisis",
                 tone="calido_firme",
                 validation="Bien, aunque sea un poco, eso ya importa.",
-                main_response=(
-                    "Sostén lo que ayudó y no agregues otra demanda por ahora."
-                ),
+                main_response="Quedense con lo que ya bajo y no agreguen otra demanda por ahora.",
                 close_softly=True,
-                tags=["crisis", "hold"],
+                state_subroute_id=active or "crisis_close_temporarily",
+                tags=["crisis", "sostener"],
             )
         if signal.outcome in ("no_change", "worse"):
-            return ResponsePlan(
+            return _plan(
+                route_id="crisis",
+                subroute_id="crisis_demand_examples",
                 goal="change_modality_after_no_effect_crisis",
                 tone="firme_claro",
-                validation="Gracias por decirlo.",
-                main_response=(
-                    "Entonces cambia de vía: menos palabras y más espacio seguro. "
-                    "Mueve la situación a un punto con menos gente o menos ruido, si se puede."
-                ),
-                optional_followup="Si necesitas, también puedo darte una frase breve para ese momento.",
-                tags=["crisis", "switch_mode"],
+                validation="Gracias por decirmelo.",
+                main_response="Entonces baja una sola demanda distinta: menos gente, menos ruido, menos luz o menos contacto.",
+                next_step="Quita una sola demanda distinta del entorno",
+                optional_followup="Si quieres, tambien te doy la frase exacta para ese cambio.",
+                tags=["crisis", "cambio_de_via"],
             )
 
-    return ResponsePlan(
+    return _plan(
+        route_id="crisis",
+        subroute_id="crisis_initial",
         goal="initial_crisis_containment",
         tone="calido_firme_breve",
         validation="Estoy contigo.",
-        main_response=(
-            "Lo primero es bajar demanda alrededor. Empieza por una sola fuente de estímulo cercana."
-        ),
-        optional_followup="Si quieres, después vemos el siguiente paso sin hacerlo todo a la vez.",
-        tags=["crisis", "initial"],
+        main_response="Lo primero es bajar una sola demanda alrededor. Quita ruido, preguntas, gente o luz, pero solo una.",
+        next_step="Quita una sola demanda alrededor",
+        optional_followup="Cuando eso baje un poco, te doy el siguiente paso sin abrir todo a la vez.",
+        tags=["crisis", "inicio"],
     )
 
 
 def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
-    if signal.turn_family == "closure_or_pause" or signal.wants_to_pause:
-        return ResponsePlan(
-            goal="pause_after_regulation_attempt",
-            tone="calido_suave",
-            validation="Esta bien.",
-            main_response="Podemos dejarlo aqui por ahora. Si despues vuelve a apretar, retoma solo una exhalacion larga o una nota breve.",
-            close_softly=True,
-            tags=["ansiedad", "pause"],
-        )
+    active = _active_subroute(signal)
 
     if signal.turn_family == "clarification_request" or signal.expresses_confusion:
-        return ResponsePlan(
+        if active == "anxiety_visible_action":
+            return _plan(
+                route_id="ansiedad",
+                subroute_id="anxiety_visible_action",
+                goal="clarify_anxiety_step",
+                tone="claro_calido",
+                validation="Si, te lo bajo.",
+                main_response="Abre una nota y escribe una sola linea con lo que te preocupa mas ahorita.",
+                next_step="Escribe una sola linea con la preocupacion principal",
+                tags=["ansiedad", "accion_visible"],
+            )
+        return _plan(
+            route_id="ansiedad",
+            subroute_id="anxiety_initial_grounding",
             goal="clarify_anxiety_step",
             tone="claro_calido",
-            validation="Si, te lo digo mas simple.",
-            main_response="Haz solo esto: apoya los pies en el piso y suelta el aire un poco mas largo una vez.",
-            tags=["ansiedad", "clarify"],
-        )
-
-    if signal.turn_family == "blocked_followup" or signal.expresses_overwhelm:
-        return ResponsePlan(
-            goal="reduce_anxiety_now",
-            tone="calido_contenedor",
-            validation="Sí, esto se puede sentir demasiado.",
-            main_response=(
-                "No tienes que resolver todo ahora. Haz solo esto: apoya los pies en el piso y suelta el aire más largo una vez."
-            ),
-            optional_followup="Si quieres, luego vemos si esto necesita acción hoy o si puede esperar.",
+            validation="Si, te lo digo directo.",
+            main_response="Haz solo esto: pies en el piso y suelta el aire mas largo una vez.",
+            next_step="Pies en el piso y una exhalacion larga",
             micro_practice="grounding_exhale",
             tags=["ansiedad", "grounding"],
         )
 
-    if signal.turn_family == "strategy_rejection":
-        return ResponsePlan(
-            goal="change_modality_after_no_effect",
-            tone="calido_claro",
-            validation="Está bien, entonces no seguimos por esa vía.",
-            main_response=(
-                "Cambiemos de enfoque. En vez de pensar más, dime si te ayuda más una cosa del cuerpo, del entorno o una frase breve."
-            ),
-            optional_followup="Si no quieres elegir, yo elijo una por ti.",
-            tags=["ansiedad", "strategy_switch"],
-        )
-
-    if signal.turn_family == "outcome_report":
-        if signal.outcome == "partial_relief":
-            return ResponsePlan(
-                goal="hold_or_close_after_partial_effect",
-                tone="calido_claro",
-                validation="Bien, aunque sea un poco ya cuenta.",
-                main_response=(
-                    "Sostén eso y no agregues otra cosa por ahora."
-                ),
-                close_softly=True,
-                tags=["ansiedad", "hold"],
-            )
-        if signal.outcome == "improved":
-            return ResponsePlan(
-                goal="close_after_effect",
-                tone="calido",
-                validation="Qué bueno que aflojó.",
-                main_response="Por ahora basta. Puedes quedarte solo con eso y seguir más tarde si hace falta.",
-                close_softly=True,
-                tags=["ansiedad", "close"],
-            )
-        if signal.outcome in ("no_change", "worse"):
-            return ResponsePlan(
-                goal="change_modality_after_no_effect",
-                tone="calido_claro",
-                validation="Gracias por decirlo.",
-                main_response=(
-                    "Entonces no seguimos con lo mismo. Haz esto: mira a tu alrededor y nombra tres cosas que ves, sin explicarlas."
-                ),
-                optional_followup="Después vemos si eso bajó un poco la carga o si cambiamos otra vez.",
-                tags=["ansiedad", "switch_modality"],
-            )
-
-    if signal.turn_family == "followup_acceptance" or signal.asks_for_next_step or signal.wants_to_continue:
-        return ResponsePlan(
-            goal="choose_one_pressure_after_grounding",
-            tone="calido_directo",
-            validation="Bien, ya no vamos con todo junto.",
-            main_response="Ahora elige una sola presion real para hoy. Si quieres, escribe una frase con eso y deja lo demas quieto.",
-            optional_followup="Si no quieres elegir, te ayudo a decidir por vencimiento o por carga.",
-            tags=["ansiedad", "next_step"],
+    if signal.turn_family == "blocked_followup" or signal.expresses_overwhelm:
+        return _plan(
+            route_id="ansiedad",
+            subroute_id="anxiety_initial_grounding",
+            goal="reduce_anxiety_now",
+            tone="calido_contenedor",
+            validation="Si, esto ya se siente demasiado.",
+            main_response="No vamos a resolver todo ahora. Primero vuelve un poco al cuerpo: pies en el piso y una exhalacion larga.",
+            next_step="Pies en el piso y una exhalacion larga",
+            micro_practice="grounding_exhale",
+            optional_followup="Cuando baje un poco, hacemos una sola accion visible.",
+            tags=["ansiedad", "grounding"],
         )
 
     if signal.turn_family == "specific_action_request":
-        return ResponsePlan(
+        return _plan(
+            route_id="ansiedad",
+            subroute_id="anxiety_visible_action",
             goal="one_real_next_step_for_anxiety",
             tone="calido_directo",
             validation="",
-            main_response=(
-                "Haz una sola cosa visible: abre una nota y escribe una frase con lo que más te aprieta ahora."
-            ),
-            optional_followup="No hace falta resolverlo todavía, solo sacarlo un poco de la cabeza.",
-            tags=["ansiedad", "visible_step"],
+            main_response="Haz una sola accion visible: abre una nota y escribe una linea con lo que te preocupa mas ahorita.",
+            next_step="Abre una nota y escribe una linea con la preocupacion principal",
+            optional_followup="No hace falta resolverlo todavia. Solo sacarlo un poco de la cabeza.",
+            tags=["ansiedad", "accion_visible"],
         )
 
-    return ResponsePlan(
+    if signal.turn_family == "followup_acceptance" or signal.asks_for_next_step or signal.wants_to_continue:
+        return _plan(
+            route_id="ansiedad",
+            subroute_id="anxiety_binary_decision",
+            goal="closed_decision_after_grounding",
+            tone="calido_directo",
+            validation="Bien, ya no vamos a abrir todo junto.",
+            main_response="Vamos a cerrarlo en una decision simple: si eso no vence hoy, lo dejas quieto por ahora. Si si vence hoy, te quedas solo con eso.",
+            optional_followup="Si quieres, escribeme cual de las dos aplica y seguimos solo por esa.",
+            state_subroute_id="anxiety_binary_decision",
+            tags=["ansiedad", "decision_cerrada"],
+        )
+
+    if signal.turn_family == "strategy_rejection":
+        return _plan(
+            route_id="ansiedad",
+            subroute_id="anxiety_repair_after_rejection",
+            goal="repair_after_frustration",
+            tone="calido_claro",
+            validation="Gracias por decirme que asi no te sirve.",
+            main_response="No voy a insistir con lo mismo. Cambio de via contigo ahora.",
+            optional_followup="Podemos ir por cuerpo treinta segundos o por una sola linea en una nota. Si no quieres elegir, elijo yo.",
+            tags=["ansiedad", "reparacion"],
+        )
+
+    if signal.turn_family == "outcome_report":
+        if signal.outcome in ("partial_relief", "improved"):
+            return _plan(
+                route_id="ansiedad",
+                subroute_id="anxiety_hold_after_partial_relief",
+                goal="hold_or_close_after_partial_effect",
+                tone="calido_claro",
+                validation="Bien, eso ya movio algo.",
+                main_response="Quedate con lo que ya bajo un poco la carga. No metas otra tecnica ahorita.",
+                close_softly=True,
+                state_subroute_id="anxiety_hold_after_partial_relief",
+                tags=["ansiedad", "sostener"],
+            )
+        if signal.outcome in ("no_change", "worse"):
+            return _plan(
+                route_id="ansiedad",
+                subroute_id="anxiety_change_modality",
+                goal="change_modality_after_no_effect",
+                tone="calido_claro",
+                validation="Gracias por decirmelo.",
+                main_response="Entonces no seguimos por el mismo carril. Cambiamos a algo mas visible: una sola frase en una nota o mover el cuerpo treinta segundos.",
+                optional_followup="Si quieres, te digo cual de las dos veo mas facil para ti ahora.",
+                state_subroute_id="anxiety_visible_action",
+                tags=["ansiedad", "cambio_de_modalidad"],
+            )
+
+    return _plan(
+        route_id="ansiedad",
+        subroute_id="anxiety_initial_grounding",
         goal="initial_anxiety_support",
-        tone="calido_contendor",
-        validation="Tiene sentido que esto te esté pesando.",
-        main_response=(
-            "Vamos despacio. Primero baja un poco la activación: apoya los pies en el piso y suelta el aire más largo una vez."
-        ),
-        optional_followup="Si luego quieres, vemos qué parte sí necesita acción hoy.",
-        tags=["ansiedad", "initial"],
+        tone="calido_contenedor",
+        validation="Tiene sentido que esto te este pesando.",
+        main_response="Vamos primero a bajar un poco la activacion: pies en el piso y una exhalacion un poco mas larga.",
+        next_step="Pies en el piso y una exhalacion larga",
+        micro_practice="grounding_exhale",
+        optional_followup="Despues vemos si hace falta una accion visible o una decision corta.",
+        tags=["ansiedad", "inicio"],
     )
 
 
 def playbook_executive_block(signal: UserSignal) -> ResponsePlan:
-    if signal.turn_family == "closure_or_pause" or signal.wants_to_pause:
-        return ResponsePlan(
-            goal="pause_after_block_step",
-            tone="calido_suave",
-            validation="Esta bien.",
-            main_response="Aqui podemos parar por ahora. Cuando vuelvas, retoma solo desde dejar el material abierto.",
-            close_softly=True,
-            tags=["bloqueo", "pause"],
+    track = _block_track(signal)
+
+    if signal.turn_family == "strategy_rejection":
+        return _plan(
+            route_id="bloqueo_ejecutivo",
+            subroute_id="executive_decide_for_user",
+            goal="replace_rejected_strategy",
+            tone="calido_claro",
+            validation="Esta bien, no voy a empujarte por donde no te sirve.",
+            main_response="Entonces lo cierro yo contigo: abre la tarea que vence primero o la mas corta, y escribe solo el titulo.",
+            next_step="Abre la tarea que vence primero o la mas corta, y escribe solo el titulo",
+            optional_followup="Con eso basta por ahora.",
+            tags=["bloqueo", "decision_guiada"],
         )
 
-    if signal.turn_family == "clarification_request" or signal.expresses_confusion:
-        return ResponsePlan(
-            goal="simplify_blocking_step",
+    if signal.turn_family == "clarification_request" or signal.expresses_confusion or track == "executive_no_entiendo":
+        return _plan(
+            route_id="bloqueo_ejecutivo",
+            subroute_id="executive_no_entiendo",
+            goal="clarify_blocking_step",
             tone="claro_calido",
-            validation="Sí, te lo digo más simple.",
-            main_response="Solo haz esto: abre el archivo, cuaderno o material. Nada más.",
-            tags=["bloqueo", "clarify"],
+            validation="Si, vamos a bajarlo mas.",
+            main_response="No intentes entenderlo todo ahorita. Abre la tarea y mira solo la consigna o la primera linea.",
+            next_step="Abre la tarea y mira solo la consigna o la primera linea",
+            optional_followup="Si sigue confuso, puedes pegarme esa parte y la partimos contigo.",
+            tags=["bloqueo", "no_entiendo"],
         )
 
     if signal.expresses_impossibility or signal.turn_family == "blocked_followup":
-        return ResponsePlan(
+        if track == "executive_no_se_que_toca":
+            return _plan(
+                route_id="bloqueo_ejecutivo",
+                subroute_id="executive_no_se_que_toca",
+                goal="resolve_unknown_next_task",
+                tone="calido_claro",
+                validation="No pasa nada si ahorita no ves que toca.",
+                main_response="Haz solo esto: abre la materia o tarea que venza primero hoy. Si hay empate, abre la mas corta.",
+                next_step="Abre la materia o tarea que venza primero hoy",
+                optional_followup="Si quieres, dime dos opciones y elijo contigo.",
+                tags=["bloqueo", "no_se_que_toca"],
+            )
+        if track == "executive_linea_de_que":
+            return _plan(
+                route_id="bloqueo_ejecutivo",
+                subroute_id="executive_linea_de_que",
+                goal="clarify_current_action",
+                tone="claro_directo",
+                validation="",
+                main_response="La primera linea puede ser una de estas: el titulo, la consigna copiada o la primera frase mas obvia.",
+                next_step="Escribe el titulo, la consigna o la primera frase mas obvia",
+                optional_followup="No tiene que quedar bien. Solo tiene que abrir la entrada.",
+                tags=["bloqueo", "linea_de_arranque"],
+            )
+        if track == "executive_no_puedo_empezar":
+            return _plan(
+                route_id="bloqueo_ejecutivo",
+                subroute_id="executive_no_puedo_empezar",
+                goal="lower_demand_for_start",
+                tone="calido_claro",
+                validation="No tienes que poder con todo para empezar.",
+                main_response="Haz lo minimo visible: abre el archivo o cuaderno y escribe solo el titulo.",
+                next_step="Abre el archivo o cuaderno y escribe solo el titulo",
+                optional_followup="Con eso basta por ahora.",
+                tags=["bloqueo", "no_puedo_empezar"],
+            )
+        if track == "executive_decide_for_user":
+            return _plan(
+                route_id="bloqueo_ejecutivo",
+                subroute_id="executive_decide_for_user",
+                goal="lower_demand_for_block",
+                tone="claro_directo",
+                validation="",
+                main_response="No decidas mas. Abre la tarea mas corta o la que vence primero, y escribe solo el titulo.",
+                next_step="Abre la tarea mas corta o la que vence primero, y escribe solo el titulo",
+                tags=["bloqueo", "decision_guiada"],
+            )
+        return _plan(
+            route_id="bloqueo_ejecutivo",
+            subroute_id="executive_no_puedo_empezar",
             goal="lower_demand_for_block",
             tone="calido_claro",
             validation="No tienes que poder con todo ahora.",
-            main_response=(
-                "Haz lo más pequeño posible: mueve la mano al material o deja el archivo abierto. Solo eso."
-            ),
-            optional_followup="Si ni eso sale, aquí podemos parar un momento y bajar más la exigencia.",
-            tags=["bloqueo", "lower_demand"],
+            main_response="Haz lo mas pequeno posible: deja el archivo abierto y la mano en el material. Solo eso.",
+            next_step="Deja el archivo abierto y la mano en el material",
+            optional_followup="Si sale eso, ya arrancaste.",
+            tags=["bloqueo", "inicio_minimo"],
         )
 
     if signal.turn_family == "specific_action_request":
-        return ResponsePlan(
+        if track in {
+            "executive_no_se_que_toca",
+            "executive_linea_de_que",
+            "executive_no_entiendo",
+            "executive_no_puedo_empezar",
+            "executive_decide_for_user",
+        }:
+            signal.active_subroute = track
+            return playbook_executive_block(
+                UserSignal(
+                    **{
+                        **signal.__dict__,
+                        "turn_family": "blocked_followup",
+                    }
+                )
+            )
+        return _plan(
+            route_id="bloqueo_ejecutivo",
+            subroute_id="executive_initial",
             goal="first_visible_step",
             tone="claro_directo",
             validation="",
-            main_response=(
-                "Empieza aquí: abre solo el material que toca y deja el cursor o la hoja lista."
-            ),
-            optional_followup="No pienses todavía en terminar; solo en dejar una salida visible.",
-            tags=["bloqueo", "first_step"],
-        )
-
-    if signal.turn_family == "strategy_rejection":
-        return ResponsePlan(
-            goal="replace_rejected_strategy",
-            tone="calido_claro",
-            validation="Está bien, entonces no seguimos por ahí.",
-            main_response=(
-                "Cambiemos de vía: dime solo el nombre de la materia o tarea, y yo te ayudo a partirla."
-            ),
-            optional_followup="Si prefieres, también puedo darte yo el primer paso sin que tengas que decidir.",
-            tags=["bloqueo", "strategy_switch"],
+            main_response="Empieza aqui: abre solo el material que toca y deja el cursor o la hoja lista.",
+            next_step="Abre el material que toca y deja el cursor o la hoja lista",
+            optional_followup="No pienses en terminar. Solo en dejar la entrada abierta.",
+            tags=["bloqueo", "inicio"],
         )
 
     if signal.turn_family == "followup_acceptance" or signal.asks_for_next_step or signal.wants_to_continue:
-        return ResponsePlan(
+        return _plan(
+            route_id="bloqueo_ejecutivo",
+            subroute_id="executive_visible_next_step",
             goal="next_step_after_opening_material",
             tone="claro_directo",
             validation="Bien, seguimos pequeno.",
-            main_response="El siguiente paso es dejar una salida visible: escribe solo el titulo o la primera linea, aunque quede simple.",
-            optional_followup="No busques hacerlo bien todavia. Solo visible.",
-            tags=["bloqueo", "next_step"],
+            main_response="El siguiente paso es dejar una salida visible: escribe solo el titulo, una vieta o una primera linea minima.",
+            next_step="Escribe solo el titulo, una vieta o una primera linea minima",
+            optional_followup="No hace falta que quede bien. Solo visible.",
+            state_subroute_id="executive_visible_next_step",
+            tags=["bloqueo", "salida_visible"],
         )
 
-    return ResponsePlan(
+    if track == "executive_no_se_que_toca":
+        return _plan(
+            route_id="bloqueo_ejecutivo",
+            subroute_id=track,
+            goal="initial_block_support",
+            tone="calido_practico",
+            validation="Si, cuando no se ve que toca, todo se frena.",
+            main_response="Empieza por la tarea que vence primero hoy. Si no sabes cual, abre la mas corta.",
+            next_step="Abre la tarea que vence primero hoy",
+            optional_followup="Luego te dejo la primera marca visible.",
+            tags=["bloqueo", "no_se_que_toca"],
+        )
+    if track == "executive_linea_de_que":
+        return _plan(
+            route_id="bloqueo_ejecutivo",
+            subroute_id=track,
+            goal="clarify_current_action",
+            tone="claro_directo",
+            validation="",
+            main_response="La primera linea puede ser el titulo, la consigna copiada o la primera frase mas obvia del tema.",
+            next_step="Escribe el titulo, la consigna o la primera frase mas obvia",
+            optional_followup="Solo necesitas abrir la entrada.",
+            tags=["bloqueo", "linea_de_arranque"],
+        )
+    if track == "executive_no_puedo_empezar":
+        return _plan(
+            route_id="bloqueo_ejecutivo",
+            subroute_id=track,
+            goal="initial_block_support",
+            tone="calido_practico",
+            validation="Si, esto puede bloquear mucho.",
+            main_response="No empieces por hacer mucho. Empieza por abrir el archivo o cuaderno y escribir solo el titulo.",
+            next_step="Abre el archivo o cuaderno y escribe solo el titulo",
+            optional_followup="Con eso ya no esta en cero.",
+            tags=["bloqueo", "no_puedo_empezar"],
+        )
+    if track == "executive_decide_for_user":
+        return _plan(
+            route_id="bloqueo_ejecutivo",
+            subroute_id=track,
+            goal="initial_block_support",
+            tone="calido_practico",
+            validation="Esta bien, yo cierro la decision contigo.",
+            main_response="Abre la tarea mas corta o la que vence primero, y escribe solo el titulo.",
+            next_step="Abre la tarea mas corta o la que vence primero, y escribe solo el titulo",
+            optional_followup="Despues te doy el siguiente paso sin abrir todo.",
+            tags=["bloqueo", "decision_guiada"],
+        )
+    return _plan(
+        route_id="bloqueo_ejecutivo",
+        subroute_id="executive_initial",
         goal="initial_block_support",
         tone="calido_practico",
-        validation="Sí, esto puede bloquear mucho.",
-        main_response="Empieza aquí: abre solo el archivo, cuaderno o material que toca.",
+        validation="Si, esto puede bloquear mucho.",
+        main_response="Empieza aqui: abre solo el archivo, cuaderno o material que toca.",
+        next_step="Abre solo el archivo, cuaderno o material que toca",
         optional_followup="Con eso alcanza por ahora.",
-        tags=["bloqueo", "initial"],
+        tags=["bloqueo", "inicio"],
     )
 
 
 def playbook_sleep(signal: UserSignal) -> ResponsePlan:
-    if signal.turn_family == "closure_or_pause" or signal.wants_to_pause:
-        return ResponsePlan(
-            goal="pause_sleep_support",
+    track = _sleep_track(signal)
+
+    if signal.turn_family == "strategy_rejection":
+        return _plan(
+            route_id="sueno",
+            subroute_id="sleep_followup",
+            goal="change_sleep_modality",
+            tone="calido_claro",
+            validation="Gracias por decirlo. No voy a repetirte lo mismo si asi no ayuda.",
+            main_response=(
+                "Cambiemos de via dentro del sueno: si la mente no para, la sacamos al papel; "
+                "si el cuerpo esta arriba, bajamos cuerpo; si el entorno molesta, ajustamos una sola cosa."
+            ),
+            optional_followup="Si quieres, elijo yo por donde conviene empezar segun lo que mas pesa.",
+            state_subroute_id=track if track != "sleep_initial" else "sleep_followup",
+            tags=["sueno", "cambio_de_via"],
+        )
+
+    if signal.turn_family == "followup_acceptance" or signal.turn_family == "post_action_followup" or signal.asks_for_next_step or signal.wants_to_continue:
+        followup_text = {
+            "sleep_mind_racing": "Despues de sacar eso al papel, deja una sola frase de cierre y no abras otro tema esta noche.",
+            "sleep_body_activated": "Ahora busca quietud, no sueno forzado: postura comoda, luz baja y respiracion sin esfuerzo.",
+            "sleep_environment": "Sosten ese ajuste unos minutos y no agregues otra medida todavia.",
+            "sleep_insomnia": "Cuando sientas un poco menos de activacion, vuelve a la cama sin forzarlo.",
+        }.get(track, "Ahora no sumes otra medida. Sosten la bajada de estimulo 5 a 10 minutos.")
+        followup_line = {
+            "sleep_mind_racing": "Eso lo veo manana. Ahorita no tengo que resolverlo.",
+        }.get(track)
+        return _plan(
+            route_id="sueno",
+            subroute_id="sleep_followup",
+            goal="next_sleep_step",
             tone="calido_suave",
-            validation="Esta bien.",
-            main_response="Podemos dejarlo aqui por ahora. Si luego quieres retomarlo, volvemos desde una sola bajada de estimulo.",
-            close_softly=True,
-            tags=["sueno", "pause"],
-        )
-
-    if signal.turn_family == "clarification_request":
-        return ResponsePlan(
-            goal="clarify_sleep_problem",
-            tone="claro_calido",
-            validation="Sí, vamos a aterrizarlo mejor.",
-            main_response=(
-                "Dime solo qué pesa más: te cuesta apagar la mente, el cuerpo sigue activado, o el entorno no ayuda a dormir."
-            ),
-            tags=["sueno", "clarify"],
-        )
-
-    if signal.turn_family == "specific_action_request":
-        return ResponsePlan(
-            goal="one_sleep_step",
-            tone="calido_directo",
-            validation="",
-            main_response=(
-                "Empieza por una sola cosa antes de dormir: baja una fuente de estímulo, como luz, ruido o pantalla."
-            ),
-            optional_followup="Después podemos ver si hace falta otra medida sencilla.",
-            tags=["sueno", "first_step"],
+            validation="Bien.",
+            main_response=followup_text,
+            literal_phrase=followup_line,
+            optional_followup="Si sigue igual despues, cambiamos una sola cosa y nada mas.",
+            state_subroute_id=track,
+            tags=["sueno", "seguimiento"],
         )
 
     if signal.turn_family == "outcome_report":
-        if signal.outcome in ("no_change", "worse"):
-            return ResponsePlan(
-                goal="change_sleep_modality",
-                tone="calido_claro",
-                validation="Gracias por decirlo.",
-                main_response=(
-                    "Entonces cambiemos de vía. En vez de seguir intentando dormir ya, haz una bajada gradual de 5 a 10 minutos sin pantalla ni exigencia."
-                ),
-                optional_followup="Y si el tema te está afectando mucho, lo más seguro es comentarlo con un profesional de salud.",
-                tags=["sueno", "switch"],
-            )
         if signal.outcome in ("partial_relief", "improved"):
-            return ResponsePlan(
+            return _plan(
+                route_id="sueno",
+                subroute_id="sleep_followup",
                 goal="hold_sleep_gain",
                 tone="calido",
                 validation="Bien, eso ya da una pista.",
-                main_response="Sostén lo que ayudó y no agregues más cosas por ahora.",
+                main_response="Sosten solo lo que ayudo y no metas mas cosas por ahora.",
                 close_softly=True,
-                tags=["sueno", "hold"],
+                state_subroute_id=track,
+                tags=["sueno", "sostener"],
+            )
+        if signal.outcome in ("no_change", "worse"):
+            next_state = "sleep_body_activated" if track == "sleep_mind_racing" else track
+            return _plan(
+                route_id="sueno",
+                subroute_id="sleep_followup",
+                goal="change_sleep_modality",
+                tone="calido_claro",
+                validation="Gracias por decirmelo.",
+                main_response="Entonces cambiamos de via. En vez de seguir intentando dormir ya, haz una bajada de cinco a diez minutos sin pantalla ni exigencia.",
+                optional_followup="Y si esto te esta afectando mucho o pasa seguido, lo mas seguro es hablarlo con un profesional de salud.",
+                state_subroute_id=next_state,
+                tags=["sueno", "cambio_de_via"],
             )
 
-    if signal.turn_family == "followup_acceptance" or signal.asks_for_next_step or signal.wants_to_continue:
-        return ResponsePlan(
-            goal="next_sleep_step_after_reducing_stimulus",
+    if track == "sleep_mind_racing":
+        return _plan(
+            route_id="sueno",
+            subroute_id=track,
+            goal="initial_sleep_mind_support",
             tone="calido_suave",
-            validation="Bien, vamos con una sola capa mas.",
-            main_response="Despues de bajar estimulos, deja una bajada gradual de 5 a 10 minutos sin pantalla ni exigencia.",
-            optional_followup="Si quieres, luego vemos si el problema pesa mas en la mente, el cuerpo o el entorno.",
-            tags=["sueno", "next_step"],
+            validation="Si, cuando la mente no para, dormir se vuelve mucho mas dificil.",
+            main_response="No intentes callarla a la fuerza. Saca a una hoja tres pendientes o preocupaciones y luego cierra la hoja.",
+            next_step="Escribe tres pendientes o preocupaciones y cierra la hoja",
+            optional_followup="Despues dejamos una sola frase de cierre y nada mas.",
+            tags=["sueno", "mente_acelerada"],
         )
-
-    return ResponsePlan(
+    if track == "sleep_body_activated":
+        return _plan(
+            route_id="sueno",
+            subroute_id=track,
+            goal="initial_sleep_body_support",
+            tone="calido_suave",
+            validation="Si, con el cuerpo tan arriba cuesta mucho bajar a dormir.",
+            main_response="Primero baja cuerpo, no sueno forzado: afloja mandibula, hombros y deja tres exhalaciones largas.",
+            next_step="Afloja mandibula, hombros y deja tres exhalaciones largas",
+            micro_practice="body_settle_exhale",
+            optional_followup="Cuando el cuerpo ceda un poco, vuelves a intentar dormir.",
+            tags=["sueno", "cuerpo_activado"],
+        )
+    if track == "sleep_environment":
+        return _plan(
+            route_id="sueno",
+            subroute_id=track,
+            goal="initial_sleep_environment_support",
+            tone="calido_suave",
+            validation="Si, a veces el problema no es solo adentro sino alrededor.",
+            main_response="Ajusta una sola cosa del entorno que estorbe: luz, ruido, pantalla o temperatura.",
+            next_step="Ajusta una sola cosa del entorno que estorbe",
+            optional_followup="No cambies todo. Una sola cosa primero.",
+            tags=["sueno", "entorno"],
+        )
+    if track == "sleep_insomnia":
+        return _plan(
+            route_id="sueno",
+            subroute_id=track,
+            goal="initial_sleep_insomnia_support",
+            tone="calido_suave",
+            validation="Si, el desvelo suele empeorar cuando tratamos de forzarlo.",
+            main_response="Si ya estas muy despierta/o, sal un momento de la pelea con el sueno: poca luz, sin pantalla y sin exigencia.",
+            next_step="Poca luz, sin pantalla y sin exigencia por unos minutos",
+            optional_followup="Cuando baje un poco la activacion, vuelves a la cama.",
+            tags=["sueno", "desvelo"],
+        )
+    return _plan(
+        route_id="sueno",
+        subroute_id="sleep_initial",
         goal="initial_sleep_support",
         tone="calido_suave",
-        validation="Sí, el sueño puede mover todo lo demás.",
-        main_response=(
-            "Vamos con algo concreto: antes de dormir, baja una sola fuente de estímulo como luz, ruido o pantalla."
-        ),
-        optional_followup="Si quieres, luego vemos si el problema es mente acelerada, cuerpo activado o entorno.",
-        tags=["sueno", "initial"],
+        validation="Si, el sueno puede mover todo lo demas.",
+        main_response="Vamos con algo concreto: baja una sola fuente de estimulo como luz, ruido o pantalla.",
+        next_step="Baja una sola fuente de estimulo como luz, ruido o pantalla",
+        optional_followup="Si quieres, luego vemos si el peso esta mas en la mente, el cuerpo o el entorno.",
+        tags=["sueno", "inicio"],
+    )
+
+
+def playbook_child_support(signal: UserSignal) -> ResponsePlan:
+    track = _child_support_track(signal)
+
+    if signal.turn_family == "literal_phrase_request" or signal.asks_for_phrase or track == "child_clear_communication":
+        return _plan(
+            route_id="apoyo_infancia_neurodivergente",
+            subroute_id="child_clear_communication",
+            goal="child_support_literal_phrase",
+            tone="calido_directo",
+            validation="",
+            main_response="Puedes decirle esto, tal cual:",
+            literal_phrase="Vamos con una sola parte. Ahora esto, luego descansamos o cerramos.",
+            optional_followup="Haz la frase corta y con voz tranquila.",
+            tags=["child_support", "comunicacion_concreta"],
+        )
+
+    if signal.turn_family == "strategy_rejection":
+        return _plan(
+            route_id="apoyo_infancia_neurodivergente",
+            subroute_id="child_co_regulation",
+            goal="repair_child_support_path",
+            tone="calido_claro",
+            validation="Gracias por decirmelo. No voy a dejarte con una salida que no ayude.",
+            main_response="Volvamos a una base mas segura: presencia calmada, voz baja y una sola referencia clara.",
+            optional_followup="Si hace falta, despues pasamos a frase corta o a menos estimulos.",
+            tags=["child_support", "cambio_de_via"],
+        )
+
+    if signal.turn_family == "followup_acceptance" or signal.asks_for_next_step or signal.wants_to_continue:
+        if track == "child_overthinking_support":
+            return _plan(
+                route_id="apoyo_infancia_neurodivergente",
+                subroute_id="child_overthinking_support",
+                goal="child_overthinking_followup",
+                tone="calido_practico",
+                validation="Bien.",
+                main_response="Despues de sacar una sola preocupacion, ayudale a mirar si eso esta pasando ahorita o si solo es una posibilidad.",
+                optional_followup="Si es una posibilidad, cierren la nota y vuelvan luego.",
+                tags=["child_support", "sobrepensamiento", "seguimiento"],
+            )
+        if track == "child_saturation_support":
+            return _plan(
+                route_id="apoyo_infancia_neurodivergente",
+                subroute_id="child_co_regulation",
+                goal="child_overload_followup",
+                tone="calido_practico",
+                validation="Bien.",
+                main_response="Ahora sosten menos palabras y mas presencia. Una instruccion corta o ninguna, segun como este.",
+                optional_followup="Si sigue subiendo, baja otro estimulo. No agregues debate.",
+                state_subroute_id="child_co_regulation",
+                tags=["child_support", "saturacion", "seguimiento"],
+            )
+        if track == "child_anticipation_routines":
+            return _plan(
+                route_id="apoyo_infancia_neurodivergente",
+                subroute_id="child_anticipation_routines",
+                goal="child_routine_followup",
+                tone="calido_practico",
+                validation="Bien.",
+                main_response="Dejale una secuencia corta y visible: ahora esto, luego esto, y despues descanso o cierre.",
+                optional_followup="Si puedes, dilo siempre con las mismas palabras.",
+                tags=["child_support", "anticipacion", "seguimiento"],
+            )
+        if track == "child_social_or_family_context":
+            return _plan(
+                route_id="apoyo_infancia_neurodivergente",
+                subroute_id="child_social_or_family_context",
+                goal="child_support_next_step",
+                tone="calido_practico",
+                validation="Bien.",
+                main_response="Ahora cuida que las otras personas no metan varias indicaciones a la vez. Una sola voz y una sola consigna corta.",
+                optional_followup="Eso suele bajar mucho la carga alrededor.",
+                tags=["child_support", "contexto_social", "seguimiento"],
+            )
+        return _plan(
+            route_id="apoyo_infancia_neurodivergente",
+            subroute_id="child_co_regulation",
+            goal="child_support_next_step",
+            tone="calido_practico",
+            validation="Bien.",
+            main_response="Ahora manten una sola ayuda, no varias: o presencia calmada, o frase corta, o ajuste de estimulos.",
+            optional_followup="Si quieres, te digo cual veo mas clara para este caso.",
+            state_subroute_id="child_co_regulation",
+            tags=["child_support", "seguimiento"],
+        )
+
+    if track == "child_overthinking_support":
+        return _plan(
+            route_id="apoyo_infancia_neurodivergente",
+            subroute_id=track,
+            goal="child_overthinking_support",
+            tone="calido_contenedor",
+            validation="Si, cuando una hija/o sobrepiensa, meter mas explicaciones suele cargar mas.",
+            main_response="Ayudale a sacar una sola preocupacion de la cabeza al papel o a voz. Una sola.",
+            next_step="Sacar una sola preocupacion de la cabeza al papel o a voz",
+            optional_followup="Despues miran solo esa.",
+            tags=["child_support", "sobrepensamiento"],
+        )
+    if track == "child_saturation_support":
+        return _plan(
+            route_id="apoyo_infancia_neurodivergente",
+            subroute_id=track,
+            goal="child_overload_support",
+            tone="calido_contenedor",
+            validation="Si, cuando ya hay saturacion, menos suele ayudar mas.",
+            main_response="Primero baja estimulos y baja palabras. No busques corregir todo al mismo tiempo.",
+            next_step="Baja estimulos y baja palabras",
+            optional_followup="Tu calma y tu tono pesan mas que una explicacion larga.",
+            tags=["child_support", "saturacion"],
+        )
+    if track == "child_reduce_stimuli":
+        return _plan(
+            route_id="apoyo_infancia_neurodivergente",
+            subroute_id=track,
+            goal="child_reduce_stimulus",
+            tone="calido_contenedor",
+            validation="Si, a veces el entorno esta empujando mucho.",
+            main_response="Haz un solo ajuste visible: menos luz, menos ruido o menos gente cerca.",
+            next_step="Haz un solo ajuste visible del entorno",
+            optional_followup="Observa si con eso su cuerpo baja un poco.",
+            tags=["child_support", "reduccion_estimulos"],
+        )
+    if track == "child_anticipation_routines":
+        return _plan(
+            route_id="apoyo_infancia_neurodivergente",
+            subroute_id=track,
+            goal="child_anticipation_support",
+            tone="calido_contenedor",
+            validation="Si, anticipar y hacer predecible suele bajar bastante la carga.",
+            main_response="Antes del cambio, dile solo las dos siguientes cosas: que pasa ahora y que pasa despues.",
+            next_step="Decirle que pasa ahora y que pasa despues",
+            optional_followup="Si puedes repetir siempre la misma secuencia, mejor.",
+            tags=["child_support", "anticipacion"],
+        )
+    if track == "child_social_or_family_context":
+        return _plan(
+            route_id="apoyo_infancia_neurodivergente",
+            subroute_id=track,
+            goal="child_social_context_support",
+            tone="calido_contenedor",
+            validation="Si, cuando hay mas gente alrededor, la carga puede subir mucho.",
+            main_response="Pidele a las otras personas una sola linea comun: una voz, una frase corta y sin correcciones cruzadas.",
+            next_step="Pide una sola voz, una sola frase corta y sin correcciones cruzadas",
+            optional_followup="Eso suele bajar la confusion y la exigencia alrededor.",
+            tags=["child_support", "contexto_social"],
+        )
+    return _plan(
+        route_id="apoyo_infancia_neurodivergente",
+        subroute_id="child_co_regulation",
+        goal="child_coregulation_support",
+        tone="calido_contenedor",
+        validation="Si, ayudar a una hija/o neurodivergente suele empezar mas por presencia que por discurso.",
+        main_response="Empieza por corregulacion: presencia tranquila, voz baja y una sola referencia clara.",
+        next_step="Presencia tranquila, voz baja y una sola referencia clara",
+        optional_followup="Si quieres, te doy la frase exacta para ese momento.",
+        tags=["child_support", "corregulacion"],
     )
 
 
 def playbook_caregiver_overload(signal: UserSignal) -> ResponsePlan:
+    track = _caregiver_track(signal)
+
     if signal.turn_family == "strategy_rejection":
-        return ResponsePlan(
+        return _plan(
+            route_id="sobrecarga_cuidador",
+            subroute_id="caregiver_single_priority",
             goal="replace_relief_path_for_caregiver",
             tone="calido_claro",
-            validation="Esta bien, no seguimos por ahi.",
-            main_response="Cambiemos de via. En vez de elegir entre todo, dime si pesa mas el ruido, las decisiones o el cansancio.",
-            optional_followup="Si no quieres elegir, yo te ayudo a dejar una sola carga quieta por ahora.",
-            tags=["cuidador", "strategy_switch"],
+            validation="Gracias por decirlo. No voy a dejarte con una salida que no te ayude.",
+            main_response="Entonces cierro la entrada contigo: primero seguridad, luego lo que vence hoy, y despues lo demas.",
+            optional_followup="Si quieres, dime cual de esas dos esta viva ahorita y lo bajamos contigo.",
+            tags=["cuidador", "cambio_de_via"],
         )
 
     if signal.turn_family == "followup_acceptance" or signal.asks_for_next_step or signal.wants_to_continue:
-        return ResponsePlan(
-            goal="release_one_load_for_caregiver",
+        if track == "caregiver_ask_for_help":
+            return _plan(
+                route_id="sobrecarga_cuidador",
+                subroute_id="caregiver_ask_for_help",
+                goal="ask_for_help_concretely",
+                tone="calido_practico",
+                validation="Bien.",
+                main_response="Pide ayuda sobre algo cerrado y concreto, no sobre todo.",
+                literal_phrase="Hoy necesito que tomes esta parte concreta para que yo pueda bajar un poco.",
+                optional_followup="Cuanto mas especifico, mas facil que te respondan.",
+                tags=["cuidador", "pedir_ayuda"],
+            )
+        if track == "caregiver_reduce_load":
+            return _plan(
+                route_id="sobrecarga_cuidador",
+                subroute_id="caregiver_self_care_without_guilt",
+                goal="reduce_load_concretely",
+                tone="calido_practico",
+                validation="Bien.",
+                main_response="Ahora deja una pausa minima sin culpa: agua, sentarte cinco minutos, respirar afuera o ir al bano sin apuro.",
+                next_step="Haz una pausa minima sin culpa",
+                optional_followup="Eso tambien sostiene el cuidado.",
+                state_subroute_id="caregiver_self_care_without_guilt",
+                tags=["cuidador", "autocuidado"],
+            )
+        return _plan(
+            route_id="sobrecarga_cuidador",
+            subroute_id="caregiver_single_priority",
+            goal="choose_one_priority_for_caregiver",
             tone="calido_practico",
-            validation="Bien, solo una cosa mas.",
-            main_response="El siguiente paso es soltar una carga concreta por ahora: una decision, una tarea o una exigencia que pueda esperar.",
-            optional_followup="No es abandonar todo; es protegerte un poco para sostener mejor lo importante.",
-            tags=["cuidador", "next_step"],
+            validation="Bien.",
+            main_response="Ahora elige una sola prioridad para hoy: seguridad, descanso o una tarea urgente. Solo una.",
+            optional_followup="Lo demas puede quedarse quieto por este momento.",
+            tags=["cuidador", "una_prioridad"],
         )
 
-    if signal.turn_family == "closure_or_pause" or signal.wants_to_pause:
-        return ResponsePlan(
-            goal="pause_caregiver_relief",
-            tone="calido_suave",
-            validation="Esta bien.",
-            main_response="Aqui podemos parar por ahora. Si luego vuelves, retomamos desde una sola carga a bajar.",
-            close_softly=True,
-            tags=["cuidador", "pause"],
+    if track == "caregiver_ask_for_help":
+        return _plan(
+            route_id="sobrecarga_cuidador",
+            subroute_id=track,
+            goal="caregiver_help_request_path",
+            tone="calido_contenedor",
+            validation="Si, cargar sola/o tanto desgasta muchisimo.",
+            main_response="No pidas ayuda en general. Pidela sobre algo concreto, con hora o tarea cerrada.",
+            next_step="Pide ayuda sobre una hora o una tarea cerrada",
+            optional_followup="Si quieres, te ayudo a redactar ese mensaje.",
+            tags=["cuidador", "pedir_ayuda"],
         )
-
-    return ResponsePlan(
-        goal="reduce_caregiver_overload",
+    if track == "caregiver_reduce_load":
+        return _plan(
+            route_id="sobrecarga_cuidador",
+            subroute_id=track,
+            goal="reduce_caregiver_overload",
+            tone="calido_contenedor",
+            validation="Si, esto puede sentirse demasiado para una sola persona.",
+            main_response="No intentes sostenerlo todo hoy. Busca una sola carga que pueda esperar y sueltala por ahora.",
+            next_step="Busca una sola carga que pueda esperar y sueltala por ahora",
+            optional_followup="Luego elegimos solo lo que si toca hoy.",
+            tags=["cuidador", "reducir_carga"],
+        )
+    if track == "caregiver_single_priority":
+        return _plan(
+            route_id="sobrecarga_cuidador",
+            subroute_id=track,
+            goal="choose_one_priority_for_caregiver",
+            tone="calido_contenedor",
+            validation="Tiene sentido que cueste elegir cuando todo se siente urgente.",
+            main_response="Vamos a cerrarlo asi: primero seguridad, luego lo que vence hoy, y despues lo demas.",
+            optional_followup="Si quieres, dime cual de esas dos esta viva ahorita y lo bajamos contigo.",
+            tags=["cuidador", "una_prioridad"],
+        )
+    if track == "caregiver_self_care_without_guilt":
+        return _plan(
+            route_id="sobrecarga_cuidador",
+            subroute_id=track,
+            goal="caregiver_self_care_without_guilt",
+            tone="calido_contenedor",
+            validation="Descansar un poco no te hace fallar.",
+            main_response="Haz una pausa minima sin culpa: agua, sentarte cinco minutos, respirar afuera o ir al bano sin apuro.",
+            next_step="Haz una pausa minima sin culpa",
+            optional_followup="Eso tambien ayuda a sostener lo demas.",
+            tags=["cuidador", "autocuidado"],
+        )
+    return _plan(
+        route_id="sobrecarga_cuidador",
+        subroute_id="caregiver_validation",
+        goal="validate_caregiver_overload",
         tone="calido_contenedor",
-        validation="Sí, esto puede sentirse demasiado para una sola persona.",
-        main_response=(
-            "No tienes que sostener todo al mismo tiempo. Elige una sola carga que podamos bajar ahora: ruido, decisiones o exigencias."
-        ),
-        optional_followup="Si quieres, te ayudo a elegir una y dejar las demás quietas por un momento.",
-        tags=["cuidador", "overload"],
+        validation="Si, esto es mucho para llevarlo sola/o.",
+        main_response="Antes de resolver, te diria una cosa: no tendrias que poder con todo al mismo tiempo.",
+        optional_followup="Si quieres, ahora elegimos una sola carga para bajar.",
+        tags=["cuidador", "validacion"],
     )
 
 
 def playbook_validation(signal: UserSignal) -> ResponsePlan:
-    return ResponsePlan(
+    return _plan(
+        route_id="general",
+        subroute_id=None,
         goal="brief_validation",
         tone="calido_claro",
         validation="",
-        main_response="Sí, tiene sentido que esto te esté pesando así.",
-        optional_followup="Si quieres, lo vemos con más calma o vamos a algo concreto.",
+        main_response="Si, tiene sentido que esto te este pesando asi.",
+        optional_followup="Si quieres, lo vemos con mas calma o vamos a algo concreto.",
         close_softly=True,
         tags=["validation"],
     )
 
 
 def playbook_clarification(signal: UserSignal) -> ResponsePlan:
-    return ResponsePlan(
+    track = _clarification_track(signal)
+    if track == "what_phrase":
+        return _plan(
+            route_id="clarificacion",
+            subroute_id=track,
+            goal="clarify_in_one_step",
+            tone="claro_calido",
+            validation="Si, te dejo una frase directa.",
+            main_response="La idea es usar una frase corta, literal y sin agregar otra instruccion encima.",
+            literal_phrase="Vamos con una sola parte ahora.",
+            tags=["clarification", "phrase"],
+        )
+    if track == "what_type":
+        return _plan(
+            route_id="clarificacion",
+            subroute_id=track,
+            goal="clarify_in_one_step",
+            tone="claro_calido",
+            validation="Si, te doy tipos concretos.",
+            main_response="Piensalo asi: puede ser una frase, un cambio de entorno, una accion visible o una pausa corta. Elige solo una.",
+            tags=["clarification", "types"],
+        )
+    if track == "where_do_i_start":
+        return _plan(
+            route_id="clarificacion",
+            subroute_id=track,
+            goal="clarify_in_one_step",
+            tone="claro_calido",
+            validation="Si, empecemos por el punto de entrada.",
+            main_response="Empieza por la accion mas pequena y visible que puedas hacer ya, sin preparar nada mas.",
+            tags=["clarification", "starting_point"],
+        )
+    return _plan(
+        route_id="clarificacion",
+        subroute_id="i_dont_understand",
         goal="clarify_in_one_step",
         tone="claro_calido",
         validation="Si, te lo digo mas simple.",
-        main_response="Vamos con una sola idea: una cosa a la vez, no todo junto.",
+        main_response="Vamos con una sola idea y una sola cosa a la vez.",
         tags=["clarification"],
     )
 
 
 def playbook_strategy_rejection(signal: UserSignal) -> ResponsePlan:
-    return ResponsePlan(
+    track = _rejection_track(signal)
+    if track == "strategy_repair":
+        return _plan(
+            route_id="rechazo_estrategia",
+            subroute_id=track,
+            goal="repair_after_frustration",
+            tone="calido_claro",
+            validation="Veo que esto te frustro, y gracias por decirmelo asi de claro.",
+            main_response="No voy a pelear contigo ni a repetirte lo mismo. Voy a cambiar la forma para que esto se sienta mas util.",
+            optional_followup="Si quieres, te doy una salida mas directa ahora mismo.",
+            tags=["strategy_rejection", "repair_bond"],
+        )
+    return _plan(
+        route_id="rechazo_estrategia",
+        subroute_id="strategy_switch",
         goal="change_strategy_without_pressure",
         tone="calido_claro",
-        validation="Esta bien, no hace falta seguir por algo que no te esta sirviendo.",
-        main_response="Cambiemos de enfoque. Te doy una alternativa mas pequena o una frase breve, sin repetir lo mismo.",
-        optional_followup="Si quieres, elijo yo la opcion mas simple y seguimos desde ahi.",
-        tags=["strategy_rejection"],
+        validation="Gracias por decir que por ahi no te sirve.",
+        main_response="Entonces cambiamos de enfoque de verdad. Te ofrezco algo mas directo, mas corto o por otra via, sin reciclar lo anterior.",
+        optional_followup="Si no quieres elegir, elijo yo la opcion mas simple para este momento.",
+        tags=["strategy_rejection", "change_path"],
     )
 
 
 def playbook_next_step(signal: UserSignal) -> ResponsePlan:
-    return ResponsePlan(
+    return _plan(
+        route_id="general",
+        subroute_id=None,
         goal="offer_next_step_without_reset",
         tone="calido_directo",
-        validation="Bien, seguimos paso a paso.",
-        main_response="El siguiente paso es hacer una sola cosa pequena y visible, sin abrir otro frente.",
-        optional_followup="Si quieres, te lo bajo todavia mas.",
+        validation="Bien, seguimos sin abrir de mas.",
+        main_response="El siguiente paso es dejar una sola accion pequena y visible.",
+        optional_followup="Si quieres, te la dejo aun mas concreta.",
         tags=["next_step"],
     )
 
 
 def playbook_meditation(signal: UserSignal) -> ResponsePlan:
-    return ResponsePlan(
-        goal="teach_short_meditation",
+    track = _meditation_track(signal)
+    if track == "one_minute_breath":
+        return _plan(
+            route_id="meditacion_guiada",
+            subroute_id=track,
+            goal="teach_short_meditation",
+            tone="calido_guiado",
+            validation="",
+            main_response="Vamos con un minuto de respiracion. Inhala normal. Ahora suelta el aire un poco mas largo. Hazlo tres veces sin forzarte.",
+            micro_practice="1_minute_breath",
+            optional_followup="Si quieres, despues hacemos una pausa todavia mas corta.",
+            tags=["meditacion", "respiracion_un_minuto"],
+        )
+    if track == "grounding_5_senses":
+        return _plan(
+            route_id="meditacion_guiada",
+            subroute_id=track,
+            goal="teach_short_grounding",
+            tone="calido_guiado",
+            validation="",
+            main_response="Vamos a aterrizar con cinco sentidos: nombra 5 cosas que ves, 4 que tocas, 3 que oyes, 2 que hueles y 1 que saboreas o recuerdas.",
+            micro_practice="5_senses_grounding",
+            optional_followup="Con eso basta por ahora.",
+            tags=["meditacion", "grounding"],
+        )
+    return _plan(
+        route_id="meditacion_guiada",
+        subroute_id="pause_guided",
+        goal="teach_guided_pause",
         tone="calido_guiado",
         validation="",
-        main_response=(
-            "Vamos con una práctica breve de un minuto. "
-            "Siéntate o quédate como estés. "
-            "Apoya los pies si puedes. "
-            "Toma aire normal. "
-            "Ahora exhala un poco más largo una vez. "
-            "Luego mira un punto fijo y cuenta tres exhalaciones sin forzarte."
-        ),
-        optional_followup="Si quieres, después te guío otra más corta o una para antes de dormir.",
-        micro_practice="1_min_breath_anchor",
-        tags=["meditacion"],
+        main_response="Haz una pausa breve conmigo: afloja hombros, suelta el aire y deja quieta la mirada unos segundos.",
+        micro_practice="guided_pause",
+        optional_followup="Si quieres, luego hacemos una de respiracion o una para dormir.",
+        tags=["meditacion", "pausa_guiada"],
     )
 
 
 def playbook_simple_question(signal: UserSignal) -> ResponsePlan:
-    return ResponsePlan(
+    return _plan(
+        route_id="pregunta_simple",
+        subroute_id=None,
         goal="answer_simple_question_briefly",
         tone="claro_directo",
         validation="",
-        main_response="Sí, puedo ayudarte con orientación breve, acompañamiento emocional y pasos concretos según lo que esté pasando.",
+        main_response="Si, puedo ayudarte con orientacion breve, acompanamiento emocional y pasos concretos segun lo que este pasando.",
         close_softly=True,
         tags=["simple_question"],
     )
 
 
 def playbook_close(signal: UserSignal) -> ResponsePlan:
-    return ResponsePlan(
+    track = _close_track(signal)
+    if track == "pause_here":
+        return _plan(
+            route_id="cierre",
+            subroute_id=track,
+            goal="closure_or_pause",
+            tone="calido_suave",
+            validation="Esta bien.",
+            main_response="Aqui podemos hacer una pausa. Si luego quieres seguir, retomamos desde donde lo dejamos.",
+            close_softly=True,
+            tags=["closure", "pause"],
+        )
+    return _plan(
+        route_id="cierre",
+        subroute_id="enough_for_now",
         goal="closure_or_pause",
         tone="calido_suave",
-        validation="Está bien.",
-        main_response="Aquí podemos parar por ahora. Si luego necesitas seguir, aquí sigo contigo.",
+        validation="Esta bien.",
+        main_response="Con esto basta por ahora. Si luego necesitas volver, aqui sigo contigo.",
         close_softly=True,
-        tags=["closure"],
+        tags=["closure", "enough_for_now"],
     )
 
+
+def playbook_low_energy(signal: UserSignal) -> ResponsePlan:
+    return _plan(
+        route_id="depresion_baja_energia",
+        subroute_id=None,
+        goal="support_low_energy_without_forcing",
+        tone="calido_suave",
+        validation="Si, esto puede dejarte sin energia hasta para lo pequeno.",
+        main_response="No hace falta empujarte demasiado ahora. Cambia de postura o apoya los pies en el piso y quedate ahi un momento.",
+        optional_followup="Si quieres, despues vemos si hay una sola cosa pequena que si sea posible hoy.",
+        tags=["baja_energia"],
+    )
+
+
+def playbook_general(signal: UserSignal) -> ResponsePlan:
+    return _plan(
+        route_id="general",
+        subroute_id=None,
+        goal="general_support",
+        tone="calido_claro",
+        validation="Aqui estoy contigo.",
+        main_response="Cuentame que parte pesa mas y lo vemos contigo, paso a paso.",
+        tags=["general"],
+    )
+
+
+# =========================================================
+# Specs
+# =========================================================
 
 PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
     "crisis": PlaybookSpec(
         route_id="crisis",
         tone_objective="calido_firme_breve",
         validation_base="Estoy contigo.",
-        max_steps=3,
-        expected_user_responses=["si", "que le digo", "sigue igual", "ya bajo un poco", "paramos aqui"],
+        max_steps=4,
+        expected_user_responses=["si, ayudame", "que le digo", "sigue igual", "ya bajo un poco", "paramos aqui"],
         if_not_understood="clarification_request",
         if_rejected="strategy_rejection",
         if_continue="followup_acceptance",
@@ -743,7 +1687,7 @@ PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
         route_id="ansiedad",
         tone_objective="calido_contenedor",
         validation_base="Tiene sentido que esto te este pesando.",
-        max_steps=3,
+        max_steps=4,
         expected_user_responses=["no puedo con todo", "y luego", "no me sirve", "ya aflojo un poco", "paramos aqui"],
         if_not_understood="clarification_request",
         if_rejected="strategy_rejection",
@@ -754,8 +1698,8 @@ PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
         route_id="bloqueo_ejecutivo",
         tone_objective="claro_calido",
         validation_base="Si, esto puede bloquear mucho.",
-        max_steps=3,
-        expected_user_responses=["no puedo", "que hago", "y luego", "eso no me sirve", "paramos aqui"],
+        max_steps=4,
+        expected_user_responses=["no puedo empezar", "no se que toca", "no entiendo", "y luego", "eso no me sirve"],
         if_not_understood="clarification_request",
         if_rejected="strategy_rejection",
         if_continue="followup_acceptance",
@@ -765,8 +1709,19 @@ PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
         route_id="sueno",
         tone_objective="calido_suave",
         validation_base="Si, el sueno puede mover todo lo demas.",
-        max_steps=3,
-        expected_user_responses=["no duermo", "y luego", "sigue igual", "ya bajo un poco", "paramos aqui"],
+        max_steps=4,
+        expected_user_responses=["mente acelerada", "desvelo", "ya, que mas", "sigue igual", "paramos aqui"],
+        if_not_understood="clarification_request",
+        if_rejected="strategy_rejection",
+        if_continue="followup_acceptance",
+        if_pause="closure_or_pause",
+    ),
+    "apoyo_infancia_neurodivergente": PlaybookSpec(
+        route_id="apoyo_infancia_neurodivergente",
+        tone_objective="calido_contenedor",
+        validation_base="Si, ayudar a una hija/o neurodivergente puede requerir mucha precision y calma.",
+        max_steps=4,
+        expected_user_responses=["como ayudo a mi hija", "que le digo", "se satura", "sobrepiensa", "y luego"],
         if_not_understood="clarification_request",
         if_rejected="strategy_rejection",
         if_continue="followup_acceptance",
@@ -776,8 +1731,8 @@ PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
         route_id="sobrecarga_cuidador",
         tone_objective="calido_contenedor",
         validation_base="Si, esto puede sentirse demasiado para una sola persona.",
-        max_steps=2,
-        expected_user_responses=["ya no puedo con esto", "y luego", "eso no me sirve", "paramos aqui"],
+        max_steps=3,
+        expected_user_responses=["ya no puedo con esto", "nadie me ayuda", "que hago primero", "y luego"],
         if_not_understood="clarification_request",
         if_rejected="strategy_rejection",
         if_continue="followup_acceptance",
@@ -799,7 +1754,18 @@ PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
         tone_objective="calido_humano_directo",
         validation_base="",
         max_steps=1,
-        expected_user_responses=["quien eres", "como puedo llamarte"],
+        expected_user_responses=["quien eres", "como puedo llamarte", "puedo platicar contigo", "que puedes hacer"],
+        if_not_understood="clarification_request",
+        if_rejected="strategy_rejection",
+        if_continue="followup_acceptance",
+        if_pause="closure_or_pause",
+    ),
+    "meditacion_guiada": PlaybookSpec(
+        route_id="meditacion_guiada",
+        tone_objective="calido_guiado",
+        validation_base="",
+        max_steps=2,
+        expected_user_responses=["un minuto", "grounding", "pausa guiada"],
         if_not_understood="clarification_request",
         if_rejected="strategy_rejection",
         if_continue="followup_acceptance",
@@ -810,7 +1776,7 @@ PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
         tone_objective="claro_calido",
         validation_base="Si, te lo digo mas simple.",
         max_steps=1,
-        expected_user_responses=["no entiendo", "no se", "como"],
+        expected_user_responses=["no entiendo", "como", "cual", "por donde"],
         if_not_understood="clarification_request",
         if_rejected="strategy_rejection",
         if_continue="followup_acceptance",
@@ -819,9 +1785,9 @@ PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
     "rechazo_estrategia": PlaybookSpec(
         route_id="rechazo_estrategia",
         tone_objective="calido_claro",
-        validation_base="Esta bien, no hace falta seguir por algo que no te esta sirviendo.",
-        max_steps=1,
-        expected_user_responses=["no me sirve", "otra cosa"],
+        validation_base="Gracias por decirlo claro.",
+        max_steps=2,
+        expected_user_responses=["no me sirve", "no sirves", "otra cosa"],
         if_not_understood="clarification_request",
         if_rejected="strategy_rejection",
         if_continue="followup_acceptance",
@@ -832,7 +1798,7 @@ PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
         tone_objective="calido_suave",
         validation_base="Esta bien.",
         max_steps=1,
-        expected_user_responses=["ya estuvo", "aqui paro"],
+        expected_user_responses=["ya estuvo", "aqui paro", "por ahora"],
         if_not_understood="clarification_request",
         if_rejected="strategy_rejection",
         if_continue="followup_acceptance",
@@ -856,13 +1822,15 @@ PLAYBOOK_BUILDERS: Dict[Domain, Callable[[UserSignal], ResponsePlan]] = {
     "ansiedad": playbook_anxiety,
     "bloqueo_ejecutivo": playbook_executive_block,
     "sueno": playbook_sleep,
+    "apoyo_infancia_neurodivergente": playbook_child_support,
     "sobrecarga_cuidador": playbook_caregiver_overload,
     "pregunta_simple": playbook_simple_question,
     "meta_question": playbook_meta_question,
+    "meditacion_guiada": playbook_meditation,
     "clarificacion": playbook_clarification,
     "rechazo_estrategia": playbook_strategy_rejection,
     "cierre": playbook_close,
-    "general": playbook_next_step,
+    "general": playbook_general,
 }
 
 
@@ -881,8 +1849,9 @@ def get_playbook_builder(route_id: Domain) -> Optional[Callable[[UserSignal], Re
 def build_response_plan(signal: UserSignal) -> ResponsePlan:
     """
     Punto principal de entrada.
-    Primero intercepta seguridad/límites, luego resuelve playbook.
+    Primero intercepta seguridad/limites, luego resuelve playbook.
     """
+
     high_risk = intercept_high_risk(signal)
     if high_risk:
         return high_risk
@@ -891,14 +1860,14 @@ def build_response_plan(signal: UserSignal) -> ResponsePlan:
     if meds:
         return meds
 
-    if signal.turn_family == "closure_or_pause" or signal.domain == "cierre":
-        return playbook_close(signal)
-
     if signal.turn_family == "meta_question" or signal.domain == "meta_question":
         return playbook_meta_question(signal)
 
     if signal.domain == "crisis":
         return playbook_crisis(signal)
+
+    if signal.turn_family == "closure_or_pause" or signal.domain == "cierre":
+        return playbook_close(signal)
 
     if signal.domain == "ansiedad":
         return playbook_anxiety(signal)
@@ -908,6 +1877,9 @@ def build_response_plan(signal: UserSignal) -> ResponsePlan:
 
     if signal.domain == "sueno":
         return playbook_sleep(signal)
+
+    if signal.domain == "apoyo_infancia_neurodivergente":
+        return playbook_child_support(signal)
 
     if signal.domain == "sobrecarga_cuidador":
         return playbook_caregiver_overload(signal)
@@ -921,6 +1893,9 @@ def build_response_plan(signal: UserSignal) -> ResponsePlan:
     if signal.turn_family == "strategy_rejection" or signal.domain == "rechazo_estrategia":
         return playbook_strategy_rejection(signal)
 
+    if signal.turn_family == "clarification_request" or signal.domain == "clarificacion":
+        return playbook_clarification(signal)
+
     if signal.turn_family == "followup_acceptance" or signal.asks_for_next_step:
         return playbook_next_step(signal)
 
@@ -928,50 +1903,31 @@ def build_response_plan(signal: UserSignal) -> ResponsePlan:
         return playbook_simple_question(signal)
 
     if signal.domain == "depresion_baja_energia":
-        return ResponsePlan(
-            goal="support_low_energy_without_forcing",
-            tone="calido_suave",
-            validation="Sí, esto puede dejarte sin energía hasta para lo pequeño.",
-            main_response=(
-                "No hace falta empujarte demasiado ahora. Haz solo esto: cambia de postura o apoya los pies en el piso y quédate ahí un momento."
-            ),
-            optional_followup=(
-                "Si quieres, después vemos si hay una sola cosa pequeña que sí sea posible hoy."
-            ),
-            tags=["baja_energia"],
-        )
+        return playbook_low_energy(signal)
 
-    if signal.turn_family == "clarification_request" or signal.domain == "clarificacion":
-        return playbook_clarification(signal)
-
-    return ResponsePlan(
-        goal="general_support",
-        tone="calido_claro",
-        validation="Aquí estoy contigo.",
-        main_response="Cuéntame qué parte pesa más y lo vemos paso a paso.",
-        tags=["general"],
-    )
+    return playbook_general(signal)
 
 
 # =========================================================
-# Helper básico para pruebas rápidas
+# Helper basico para pruebas rapidas
 # =========================================================
 
 def infer_basic_signal(user_text: str, domain: Domain, turn_family: TurnFamily) -> UserSignal:
     """
-    Helper básico por si necesitas prototipar rápido.
-    No sustituye routers más finos, pero sirve para conectar playbooks.
+    Helper basico por si necesitas prototipar rapido.
+    No sustituye routers mas finos, pero sirve para conectar playbooks.
     """
+
     text = normalize_text(user_text)
 
     outcome: OutcomePolarity = "unknown"
-    if contains_any(text, ["sigo igual", "no cambio", "no cambió", "no ayudo", "no ayudó"]):
+    if contains_any(text, ["sigo igual", "no cambio", "no ayudo", "no funciono"]):
         outcome = "no_change"
-    elif contains_any(text, ["empeoro", "empeoró", "peor", "subio", "subió más"]):
+    elif contains_any(text, ["empeoro", "peor", "subio mas"]):
         outcome = "worse"
-    elif contains_any(text, ["bajo un poco", "me ayudo un poco", "me ayudó un poco", "aflojo un poco"]):
+    elif contains_any(text, ["bajo un poco", "me ayudo un poco", "aflojo un poco"]):
         outcome = "partial_relief"
-    elif contains_any(text, ["ya estoy mejor", "ya bajo", "ya bajó", "me ayudo", "me ayudó"]):
+    elif contains_any(text, ["ya estoy mejor", "ya bajo", "me ayudo"]):
         outcome = "improved"
 
     return UserSignal(
@@ -980,31 +1936,84 @@ def infer_basic_signal(user_text: str, domain: Domain, turn_family: TurnFamily) 
         outcome=outcome,
         user_text=user_text,
         asks_for_meds=contains_any(text, MED_REQUEST_MARKERS),
-        asks_for_phrase=contains_any(text, ["que frase", "qué frase", "que digo", "qué digo", "que le digo", "qué le digo", "que puedo decirle", "qué puedo decirle"]),
-        asks_for_next_step=contains_any(text, ["y luego", "que sigue", "qué sigue", "que mas", "qué más", "y despues", "y después", "y ahora que", "y ahora qué"]),
-        expresses_confusion=contains_any(text, ["no entiendo", "no te entiendo", "como", "cómo", "que?", "qué?"]),
-        expresses_overwhelm=contains_any(text, ["me gana", "no puedo con todo", "todo se me junta", "me rebasa", "me rebaso"]),
-        expresses_rejection=contains_any(text, ["no me sirve", "no me ayuda", "otra cosa", "eso no funciona", "eso no aplica"]),
-        expresses_impossibility=contains_any(text, ["no puedo", "no me sale", "no me da", "no logro"]),
-        wants_to_pause=contains_any(text, ["por ahora ya", "ya estuvo", "aqui paro", "aquí paro"]),
-        wants_to_continue=contains_any(text, ["si", "sí", "ok", "dale", "continua", "continúa"]),
+        asks_for_phrase=contains_any(
+            text,
+            [
+                "que frase",
+                "que digo",
+                "que le digo",
+                "que puedo decirle",
+                "como le digo",
+            ],
+        ),
+        asks_for_next_step=contains_any(
+            text,
+            [
+                "y luego",
+                "que sigue",
+                "que mas",
+                "y despues",
+                "y ahora que",
+            ],
+        ),
+        expresses_confusion=contains_any(
+            text,
+            [
+                "no entiendo",
+                "no te entiendo",
+                "como",
+            ],
+        ),
+        expresses_overwhelm=contains_any(
+            text,
+            [
+                "me gana",
+                "no puedo con todo",
+                "todo se me junta",
+                "me rebasa",
+            ],
+        ),
+        expresses_rejection=contains_any(
+            text,
+            [
+                "no me sirve",
+                "no me ayuda",
+                "otra cosa",
+                "eso no funciona",
+                "no sirves",
+            ],
+        ),
+        expresses_impossibility=contains_any(
+            text,
+            [
+                "no puedo",
+                "no me sale",
+                "no me da",
+                "no logro",
+                "no puedo empezar",
+            ],
+        ),
+        wants_to_pause=contains_any(text, ["por ahora ya", "ya estuvo", "aqui paro"]),
+        wants_to_continue=contains_any(text, ["si", "ok", "dale", "continua", "ayudame"]),
         mentions_risk=contains_any(text, HIGH_RISK_MARKERS),
     )
 
 
 if __name__ == "__main__":
     examples = [
-        infer_basic_signal("Está ocurriendo una crisis y necesito ayuda", "crisis", "new_request"),
-        infer_basic_signal("qué le digo?", "crisis", "literal_phrase_request"),
-        infer_basic_signal("mejor dime qué pastillas tomar", "sueno", "specific_action_request"),
-        infer_basic_signal("quién eres?", "meta_question", "meta_question"),
+        infer_basic_signal("Esta ocurriendo una crisis y necesito ayuda", "crisis", "new_request"),
+        infer_basic_signal("que le digo?", "crisis", "literal_phrase_request"),
+        infer_basic_signal("mejor dime que pastillas tomar", "sueno", "specific_action_request"),
+        infer_basic_signal("quien eres?", "meta_question", "meta_question"),
         infer_basic_signal("no puedo ni empezar", "bloqueo_ejecutivo", "blocked_followup"),
     ]
 
-    for s in examples:
-        plan = build_response_plan(s)
+    for signal in examples:
+        plan = build_response_plan(signal)
         print("=" * 60)
-        print("USER:", s.user_text)
+        print("USER:", signal.user_text)
+        print("ROUTE:", plan.route_id)
+        print("SUBROUTE:", plan.subroute_id)
         print("GOAL:", plan.goal)
         print("MAIN:", plan.main_response)
         if plan.literal_phrase:

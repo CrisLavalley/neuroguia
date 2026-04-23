@@ -68,6 +68,7 @@ class SupportFlowEngine:
         "ansiedad": "ansiedad_cognitiva",
         "bloqueo_ejecutivo": "disfuncion_ejecutiva",
         "sueno": "sueno_regulacion",
+        "apoyo_infancia_neurodivergente": "apoyo_infancia_neurodivergente",
         "sobrecarga_cuidador": "sobrecarga_cuidador",
         "pregunta_simple": "apoyo_general",
         "meta_question": "apoyo_general",
@@ -85,6 +86,7 @@ class SupportFlowEngine:
         "ansiedad": "cognitive_unloading",
         "bloqueo_ejecutivo": "micro_start",
         "sueno": "wind_down",
+        "apoyo_infancia_neurodivergente": "co_regulation",
         "sobrecarga_cuidador": "relief",
         "pregunta_simple": "clarification",
         "meta_question": "clarification",
@@ -102,6 +104,7 @@ class SupportFlowEngine:
         "ansiedad": "reduce_mental_overload",
         "bloqueo_ejecutivo": "enable_first_step",
         "sueno": "stabilize_sleep_transition",
+        "apoyo_infancia_neurodivergente": "support_neurodivergent_child",
         "sobrecarga_cuidador": "reduce_caregiver_burden",
         "pregunta_simple": "answer_directly",
         "meta_question": "answer_directly",
@@ -122,6 +125,7 @@ class SupportFlowEngine:
         "ansiedad_cognitiva": "ansiedad",
         "disfuncion_ejecutiva": "bloqueo_ejecutivo",
         "sueno_regulacion": "sueno",
+        "apoyo_infancia_neurodivergente": "apoyo_infancia_neurodivergente",
         "sobrecarga_cuidador": "sobrecarga_cuidador",
         "apoyo_general": "general",
     }
@@ -154,6 +158,7 @@ class SupportFlowEngine:
         "ansiedad",
         "bloqueo_ejecutivo",
         "sueno",
+        "apoyo_infancia_neurodivergente",
         "sobrecarga_cuidador",
     }
     DOMAIN_LOCK_FAMILIES = {
@@ -187,6 +192,8 @@ class SupportFlowEngine:
     REJECTION_MARKERS = [
         "no me sirve",
         "no me ayuda",
+        "no sirves",
+        "no ayudas",
         "eso no funciona",
         "otra cosa",
         "no quiero seguir por ahi",
@@ -264,10 +271,14 @@ class SupportFlowEngine:
     CONFIRMATION_MARKERS = [
         "ok",
         "si",
+        "si ayudame",
+        "si ayudame por favor",
         "ya",
         "listo",
         "aja",
         "vale",
+        "ayudame",
+        "ayudame por favor",
         "si por favor",
         "por favor",
         "va",
@@ -321,10 +332,45 @@ class SupportFlowEngine:
         "no descanso",
         "desvelo",
     ]
-    CAREGIVER_CHILD_MARKERS = [
+    CHILD_TARGET_MARKERS = [
         "mi hijo",
         "mi hija",
         "mis hijos",
+    ]
+    CHILD_SUPPORT_MARKERS = [
+        "como ayudo a mi hija",
+        "como ayudo a mi hijo",
+        "como ayudo a mis hijos",
+        "como le ayudo",
+        "como lo ayudo",
+        "como la ayudo",
+        "como lo acompano",
+        "como la acompano",
+        "como le digo",
+        "que le digo",
+        "sobrepiensa",
+        "sobrepens",
+        "se satura",
+        "saturacion",
+        "corregulacion",
+        "regularse",
+        "estimulos",
+        "rutina",
+        "transicion",
+    ]
+    CAREGIVER_OVERLOAD_MARKERS = [
+        "ya no puedo con esto",
+        "ya no puedo",
+        "no puedo mas",
+        "me rebasa cuidar",
+        "me pesa cuidar",
+        "estoy agotada de cuidar",
+        "estoy agotado de cuidar",
+        "todo me toca a mi",
+        "todo depende de mi",
+        "nadie me ayuda",
+        "estoy sola",
+        "estoy solo",
     ]
     EXPLICIT_DOMAIN_SHIFT_MARKERS: Dict[Domain, List[str]] = {
         "crisis": [
@@ -352,15 +398,23 @@ class SupportFlowEngine:
             "ahora el problema es dormir",
             "esto es insomnio",
         ],
+        "apoyo_infancia_neurodivergente": [
+            "como ayudo a mi hija",
+            "como ayudo a mi hijo",
+            "mi hija sobrepiensa",
+            "mi hijo sobrepiensa",
+            "mi hija se satura",
+            "mi hijo se satura",
+            "como le digo",
+            "como lo acompano",
+            "como la acompano",
+        ],
         "sobrecarga_cuidador": [
-            "esto es mi hijo",
-            "esto es mi hija",
-            "esto es de mi hijo",
-            "esto es de mi hija",
-            "esto es de mis hijos",
-            "con mi hijo",
-            "con mi hija",
-            "con mis hijos",
+            "ya no puedo con esto",
+            "me rebasa cuidar",
+            "nadie me ayuda",
+            "estoy agotada de cuidar",
+            "estoy agotado de cuidar",
         ],
     }
     ROUTE_TEXT_MARKERS: Dict[Domain, List[str]] = {
@@ -401,15 +455,37 @@ class SupportFlowEngine:
             "insomnio",
             "pantalla antes de dormir",
         ],
+        "apoyo_infancia_neurodivergente": [
+            "como ayudo a mi hija",
+            "como ayudo a mi hijo",
+            "como ayudo a mis hijos",
+            "mi hija sobrepiensa",
+            "mi hijo sobrepiensa",
+            "mi hija se satura",
+            "mi hijo se satura",
+            "como le digo",
+            "como la acompano",
+            "como lo acompano",
+            "corregulacion",
+            "rutina",
+            "transicion",
+        ],
+        "meditacion_guiada": [
+            "meditacion",
+            "meditacion breve",
+            "respiracion de un minuto",
+            "respiracion 1 minuto",
+            "grounding",
+            "pausa guiada",
+        ],
         "sobrecarga_cuidador": [
             "ya no puedo con esto",
             "cuidar",
             "me pesa cuidar",
             "agotada de cuidar",
             "agotado de cuidar",
-            "mi hijo",
-            "mi hija",
-            "mis hijos",
+            "nadie me ayuda",
+            "todo me toca a mi",
         ],
     }
     ACTION_FOLLOWUP_FAMILIES = {
@@ -493,6 +569,10 @@ class SupportFlowEngine:
             domain=route_id,
             turn_family=turn_family,
         )
+        signal.active_subroute = self._resolve_active_subroute(
+            previous_frame=previous_frame,
+            route_id=route_id,
+        )
         signal.outcome = outcome
         signal.asks_for_phrase = turn_family == "literal_phrase_request"
         signal.asks_for_next_step = turn_family in {"followup_acceptance", "post_action_followup"}
@@ -550,10 +630,21 @@ class SupportFlowEngine:
             outcome=outcome,
             guidance_mode=guidance_mode,
         )
+        active_subroute_id = (
+            (
+                str(response_plan.state_subroute_id or response_plan.subroute_id or "").strip()
+                if response_plan
+                else ""
+            )
+            or signal.active_subroute
+            or None
+        )
         support_flow_state = {
             "active": handled,
             "handled_by": "support_flow_engine",
             "route_id": route_id,
+            "subroute_id": response_plan.subroute_id if response_plan else None,
+            "active_subroute_id": active_subroute_id,
             "conversation_domain": conversation_domain,
             "active_domain_lock": (
                 route_id if handled and route_id in self.DOMAIN_LOCKABLE_ROUTES else None
@@ -565,6 +656,7 @@ class SupportFlowEngine:
             "step_index": step_index,
             "max_steps": spec.max_steps if spec else 1,
             "goal": response_plan.goal if response_plan else None,
+            "humanization_required": bool(response_plan.humanization_required) if response_plan else False,
             "close_softly": bool(response_plan.close_softly) if response_plan else False,
             "playbook_tags": list(response_plan.tags) if response_plan else [],
             "last_action_instruction": action_state.get("last_action_instruction"),
@@ -577,12 +669,15 @@ class SupportFlowEngine:
             "last_safety_intercept_type": intercept_state.get("last_safety_intercept_type"),
             "pre_intercept_route": intercept_state.get("pre_intercept_route"),
             "pre_intercept_domain": intercept_state.get("pre_intercept_domain"),
+            "pre_intercept_subroute": intercept_state.get("pre_intercept_subroute"),
             "awaiting_post_intercept_resume": intercept_state.get("awaiting_post_intercept_resume", False),
         }
 
         notes: List[str] = []
         if previous_route:
             notes.append(f"previous_route:{previous_route}")
+        if active_subroute_id:
+            notes.append(f"active_subroute:{active_subroute_id}")
         if continuity_reason:
             notes.append(f"continuity:{continuity_reason}")
         if followup_trace.get("followup_exit"):
@@ -608,6 +703,8 @@ class SupportFlowEngine:
             return {}
 
         response_text = self.render_response_text(result.response_plan)
+        response_plan_payload = self._serialize_response_plan(result.response_plan)
+        selected_subroute = result.response_plan.subroute_id or result.response_plan.goal
         selected_microaction = self._selected_microaction(result.response_plan)
         response_shape = self._response_shape(result)
         stage_name = "guided_support_flow"
@@ -617,7 +714,7 @@ class SupportFlowEngine:
 
         response_goal = {
             "goal": result.response_plan.goal,
-            "strategy_signature": f"support_flow:{result.route_id}:{result.response_plan.goal}",
+            "strategy_signature": f"support_flow:{result.route_id}:{selected_subroute}:{result.response_plan.goal}",
             "response_shape": response_shape,
             "form_variant": result.guidance_mode,
             "intervention_level": intervention_level,
@@ -627,18 +724,22 @@ class SupportFlowEngine:
             "should_offer_question": False,
             "followup_policy": "avoid",
             "selected_microaction": selected_microaction,
-            "selected_strategy": result.response_plan.goal,
+            "selected_strategy": selected_subroute,
+            "selected_subroute": selected_subroute,
             "selected_routine_type": None,
             "suggested_content": [result.response_plan.main_response],
             "priority_order": [result.route_id, result.guidance_mode],
             "intervention_type": "guided_support_flow",
             "keep_minimal": should_close,
+            "domain_focus": list(result.response_plan.tags),
+            "humanization_required": bool(result.response_plan.humanization_required),
         }
 
         decision_payload = {
             "decision_mode": "support_flow_engine",
             "intervention_type": "guided_support_flow",
-            "selected_strategy": result.response_plan.goal,
+            "selected_strategy": selected_subroute,
+            "selected_subroute": selected_subroute,
             "selected_microaction": selected_microaction,
             "selected_routine_type": None,
             "priority_order": response_goal["priority_order"],
@@ -647,9 +748,12 @@ class SupportFlowEngine:
                 "handled_by_support_flow_engine": True,
                 "guidance_mode": result.guidance_mode,
                 "turn_family": result.turn_family,
+                "use_support_flow_plan": True,
+                "requires_support_flow_humanization": bool(result.response_plan.humanization_required),
             },
             "response_goal": response_goal,
             "response_plan": response_goal,
+            "support_flow_response_plan": response_plan_payload,
             "reuse_response_candidate": None,
         }
 
@@ -686,16 +790,17 @@ class SupportFlowEngine:
         }
 
         fallback_payload = {
-            "use_llm": False,
-            "fallback_reason": "handled_by_support_flow_engine",
-            "prompt_mode": "guided_support_flow",
+            "use_llm": bool(result.response_plan.humanization_required),
+            "fallback_reason": "support_flow_humanization",
+            "prompt_mode": "support_flow_humanization",
             "should_learn_if_good": False,
+            "prefer_support_flow_local_humanizer": True,
         }
 
         llm_policy = {
-            "should_use_llm": False,
-            "reason": "handled_by_support_flow_engine",
-            "prompt_mode": "guided_support_flow",
+            "should_use_llm": bool(result.response_plan.humanization_required),
+            "reason": "support_flow_humanization",
+            "prompt_mode": "support_flow_humanization",
             "domain": result.conversation_domain,
             "phase": phase,
             "category": result.conversation_domain,
@@ -715,14 +820,18 @@ class SupportFlowEngine:
             "mode": "guided_support_flow",
             "is_flow_engine_response": True,
             "suggested_strategy": decision_payload["selected_strategy"],
+            "suggested_subroute": selected_subroute,
             "suggested_microaction": selected_microaction,
             "suggested_question": None,
             "response_metadata": {
                 "source": "support_flow_engine",
                 "is_flow_engine_response": True,
                 "route_id": result.route_id,
+                "subroute_id": selected_subroute,
                 "turn_family": result.turn_family,
                 "guidance_mode": result.guidance_mode,
+                "requires_humanization": bool(result.response_plan.humanization_required),
+                "response_plan": response_plan_payload,
                 "support_flow_state": dict(result.support_flow_state),
             },
         }
@@ -730,6 +839,7 @@ class SupportFlowEngine:
         stage_hints = {
             "source": "support_flow_engine",
             "route_id": result.route_id,
+            "subroute_id": selected_subroute,
             "turn_family": result.turn_family,
             "guidance_mode": result.guidance_mode,
         }
@@ -744,6 +854,7 @@ class SupportFlowEngine:
             "last_action_type": result.support_flow_state.get("last_action_type"),
             "last_action_goal": result.support_flow_state.get("last_action_goal"),
             "last_action_domain": result.support_flow_state.get("last_action_domain"),
+            "subroute_id": selected_subroute,
             "support_flow_state": dict(result.support_flow_state),
         }
 
@@ -759,6 +870,7 @@ class SupportFlowEngine:
             "last_action_type": result.support_flow_state.get("last_action_type"),
             "last_action_goal": result.support_flow_state.get("last_action_goal"),
             "last_action_domain": result.support_flow_state.get("last_action_domain"),
+            "subroute_id": selected_subroute,
             "support_flow_state": dict(result.support_flow_state),
         }
 
@@ -773,6 +885,7 @@ class SupportFlowEngine:
             "response_package": response_package,
             "conversation_control_updates": conversation_control_updates,
             "conversation_frame_updates": conversation_frame_updates,
+            "support_flow_response_plan": response_plan_payload,
         }
 
     def render_response_text(self, response_plan: ResponsePlan) -> str:
@@ -786,6 +899,97 @@ class SupportFlowEngine:
         if response_plan.optional_followup:
             parts.append(response_plan.optional_followup.strip())
         return " ".join(part for part in parts if part).strip()
+
+    def _make_engine_plan(
+        self,
+        route_id: Domain,
+        subroute_id: Optional[str],
+        *,
+        goal: str,
+        tone: str,
+        validation: str,
+        main_response: str,
+        optional_followup: Optional[str] = None,
+        next_step: Optional[str] = None,
+        literal_phrase: Optional[str] = None,
+        micro_practice: Optional[str] = None,
+        safety_note: Optional[str] = None,
+        close_softly: bool = False,
+        needs_professional_redirect: bool = False,
+        state_subroute_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> ResponsePlan:
+        merged_tags: List[str] = []
+        for candidate in [route_id, subroute_id or "", *(tags or [])]:
+            cleaned = str(candidate or "").strip()
+            if cleaned and cleaned not in merged_tags:
+                merged_tags.append(cleaned)
+        return ResponsePlan(
+            goal=goal,
+            tone=tone,
+            validation=validation,
+            main_response=main_response,
+            optional_followup=optional_followup,
+            next_step=next_step,
+            literal_phrase=literal_phrase,
+            micro_practice=micro_practice,
+            safety_note=safety_note,
+            close_softly=close_softly,
+            needs_professional_redirect=needs_professional_redirect,
+            route_id=route_id,
+            subroute_id=subroute_id,
+            state_subroute_id=state_subroute_id or subroute_id,
+            humanization_required=True,
+            tags=merged_tags,
+        )
+
+    def _serialize_response_plan(self, response_plan: ResponsePlan) -> Dict[str, Any]:
+        return {
+            "goal": response_plan.goal,
+            "tone": response_plan.tone,
+            "validation": response_plan.validation,
+            "main_response": response_plan.main_response,
+            "optional_followup": response_plan.optional_followup,
+            "next_step": response_plan.next_step,
+            "literal_phrase": response_plan.literal_phrase,
+            "micro_practice": response_plan.micro_practice,
+            "safety_note": response_plan.safety_note,
+            "close_softly": bool(response_plan.close_softly),
+            "needs_professional_redirect": bool(response_plan.needs_professional_redirect),
+            "route_id": response_plan.route_id,
+            "subroute_id": response_plan.subroute_id,
+            "state_subroute_id": response_plan.state_subroute_id,
+            "humanization_required": bool(response_plan.humanization_required),
+            "tags": list(response_plan.tags),
+        }
+
+    def _resolve_active_subroute(
+        self,
+        previous_frame: Dict[str, Any],
+        route_id: Domain,
+    ) -> Optional[str]:
+        support_state = dict(previous_frame.get("support_flow_state") or {})
+        related_route = (
+            self._coerce_route(
+                support_state.get("route_id")
+                or support_state.get("active_domain_lock")
+                or support_state.get("pre_intercept_route")
+                or previous_frame.get("conversation_domain")
+            )
+        )
+        if related_route and related_route != route_id:
+            return None
+
+        for candidate in [
+            support_state.get("active_subroute_id"),
+            support_state.get("state_subroute_id"),
+            support_state.get("subroute_id"),
+            support_state.get("pre_intercept_subroute"),
+        ]:
+            subroute_id = str(candidate or "").strip()
+            if subroute_id:
+                return subroute_id
+        return None
 
     def _resolve_previous_route(self, previous_frame: Dict[str, Any]) -> Optional[Domain]:
         support_state = previous_frame.get("support_flow_state") or {}
@@ -861,6 +1065,8 @@ class SupportFlowEngine:
             return "crisis"
         if self._has_strong_caregiver_signal(normalized):
             return "sobrecarga_cuidador"
+        if self._has_child_support_signal(normalized):
+            return "apoyo_infancia_neurodivergente"
         if self._has_strong_sleep_signal(normalized):
             return "sueno"
 
@@ -966,7 +1172,16 @@ class SupportFlowEngine:
         turn_family: TurnFamily,
         continuity_score: float,
     ) -> bool:
-        if route_id in {"crisis", "ansiedad", "bloqueo_ejecutivo", "sueno", "sobrecarga_cuidador", "meta_question"}:
+        if route_id in {
+            "crisis",
+            "ansiedad",
+            "bloqueo_ejecutivo",
+            "sueno",
+            "apoyo_infancia_neurodivergente",
+            "sobrecarga_cuidador",
+            "meta_question",
+            "meditacion_guiada",
+        }:
             return True
         if route_id in {"clarificacion", "rechazo_estrategia", "cierre", "pregunta_simple"}:
             return True
@@ -1156,6 +1371,12 @@ class SupportFlowEngine:
                 or support_state.get("last_action_goal")
                 or ""
             ).strip(),
+            "active_subroute_id": str(
+                support_state.get("active_subroute_id")
+                or support_state.get("state_subroute_id")
+                or support_state.get("subroute_id")
+                or ""
+            ).strip(),
             "last_action_domain": str(last_action_domain or "").strip(),
             "action_followup_count": int(support_state.get("action_followup_count", 0) or 0),
             "recent_followup_modes": list(support_state.get("recent_followup_modes") or []),
@@ -1209,8 +1430,18 @@ class SupportFlowEngine:
     def _has_strong_sleep_signal(self, normalized: str) -> bool:
         return self._contains_any(normalized, self.SLEEP_PRIORITY_MARKERS)
 
+    def _has_child_support_signal(self, normalized: str) -> bool:
+        has_child_target = self._contains_any(normalized, self.CHILD_TARGET_MARKERS)
+        if not has_child_target:
+            return False
+        if self._has_strong_caregiver_signal(normalized):
+            return False
+        if self._contains_any(normalized, self.CHILD_SUPPORT_MARKERS):
+            return True
+        return any(token in normalized for token in {"como ayudo", "que le digo", "que hago con"})
+
     def _has_strong_caregiver_signal(self, normalized: str) -> bool:
-        return self._contains_any(normalized, self.CAREGIVER_CHILD_MARKERS)
+        return self._contains_any(normalized, self.CAREGIVER_OVERLOAD_MARKERS)
 
     def _coerce_route(self, value: Any) -> Optional[Domain]:
         route = str(value or "").strip()
@@ -1260,6 +1491,9 @@ class SupportFlowEngine:
         if self._has_strong_caregiver_signal(normalized):
             return "sobrecarga_cuidador"
 
+        if self._has_child_support_signal(normalized):
+            return "apoyo_infancia_neurodivergente"
+
         for route_id, markers in self.EXPLICIT_DOMAIN_SHIFT_MARKERS.items():
             if self._contains_any(normalized, markers):
                 return route_id
@@ -1304,6 +1538,7 @@ class SupportFlowEngine:
         current_type = str(previous_state.get("last_safety_intercept_type") or "").strip() or None
         current_route = self._coerce_route(previous_state.get("pre_intercept_route"))
         current_domain = str(previous_state.get("pre_intercept_domain") or "").strip() or None
+        current_subroute = str(previous_state.get("pre_intercept_subroute") or "").strip() or None
         awaiting_resume = bool(previous_state.get("awaiting_post_intercept_resume"))
 
         if response_plan and response_plan.goal == "safe_medication_boundary":
@@ -1317,10 +1552,16 @@ class SupportFlowEngine:
                 or str(previous_state.get("conversation_domain") or "").strip()
                 or self.ROUTE_TO_CONVERSATION_DOMAIN.get(preserved_route, conversation_domain)
             )
+            preserved_subroute = (
+                (current_subroute if current_type == "medication_boundary" and awaiting_resume else None)
+                or str(previous_state.get("active_subroute_id") or previous_state.get("state_subroute_id") or previous_state.get("subroute_id") or "").strip()
+                or None
+            )
             return {
                 "last_safety_intercept_type": "medication_boundary",
                 "pre_intercept_route": preserved_route,
                 "pre_intercept_domain": preserved_domain,
+                "pre_intercept_subroute": preserved_subroute,
                 "awaiting_post_intercept_resume": True,
             }
 
@@ -1329,6 +1570,7 @@ class SupportFlowEngine:
                 "last_safety_intercept_type": None,
                 "pre_intercept_route": current_route or route_id,
                 "pre_intercept_domain": current_domain or self.ROUTE_TO_CONVERSATION_DOMAIN.get(current_route or route_id, conversation_domain),
+                "pre_intercept_subroute": current_subroute,
                 "awaiting_post_intercept_resume": False,
             }
 
@@ -1337,6 +1579,7 @@ class SupportFlowEngine:
                 "last_safety_intercept_type": current_type,
                 "pre_intercept_route": current_route or route_id,
                 "pre_intercept_domain": current_domain or self.ROUTE_TO_CONVERSATION_DOMAIN.get(current_route or route_id, conversation_domain),
+                "pre_intercept_subroute": current_subroute,
                 "awaiting_post_intercept_resume": True,
             }
 
@@ -1344,6 +1587,7 @@ class SupportFlowEngine:
             "last_safety_intercept_type": None,
             "pre_intercept_route": None,
             "pre_intercept_domain": None,
+            "pre_intercept_subroute": None,
             "awaiting_post_intercept_resume": False,
         }
 
@@ -1364,8 +1608,11 @@ class SupportFlowEngine:
             self._coerce_route(previous_state.get("pre_intercept_route"))
             or route_id
         )
+        resumed_subroute = str(previous_state.get("pre_intercept_subroute") or "").strip() or None
         if resumed_route == "sueno":
-            return ResponsePlan(
+            return self._make_engine_plan(
+                route_id="sueno",
+                subroute_id="sleep_initial",
                 goal="resume_sleep_after_medication_boundary",
                 tone="calido_directo",
                 validation="Va.",
@@ -1374,7 +1621,8 @@ class SupportFlowEngine:
                     "baja una sola fuente de estimulo como pantalla, luz o ruido durante 10 minutos antes de acostarte."
                 ),
                 optional_followup="Si quieres, luego vemos si lo que mas pesa es la mente, el cuerpo o el entorno.",
-                tags=["sueno", "resume_after_medication_boundary", "non_pharmacological_step"],
+                state_subroute_id=resumed_subroute or "sleep_initial",
+                tags=["resume_after_medication_boundary", "non_pharmacological_step"],
             )
 
         resumed_signal = UserSignal(
@@ -1383,6 +1631,7 @@ class SupportFlowEngine:
             user_text="",
             asks_for_next_step=True,
             wants_to_continue=True,
+            active_subroute=resumed_subroute,
         )
         return build_response_plan(resumed_signal)
 
@@ -1408,10 +1657,20 @@ class SupportFlowEngine:
     ) -> ResponsePlan:
         last_action_type = str(action_memory.get("last_action_type") or "").strip()
         instruction = str(action_memory.get("last_action_instruction") or "").strip()
+        active_subroute = str(action_memory.get("active_subroute_id") or "").strip() or None
 
         if self._wants_literal_phrase(normalized=normalized, action_memory=action_memory):
             literal_phrase = instruction if last_action_type == "literal_phrase" and instruction else self._default_literal_phrase(route_id)
-            return ResponsePlan(
+            subroute_id = (
+                "crisis_literal_phrase"
+                if route_id == "crisis"
+                else "child_clear_communication"
+                if route_id == "apoyo_infancia_neurodivergente"
+                else "what_phrase"
+            )
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id=subroute_id,
                 goal="clarify_current_action",
                 tone="claro_directo",
                 validation="",
@@ -1422,43 +1681,66 @@ class SupportFlowEngine:
                     if route_id == "crisis"
                     else "Usa esa frase tal cual, sin hacerla mas larga."
                 ),
-                tags=[route_id, "clarify_current_action", "literal_phrase"],
+                state_subroute_id=active_subroute or subroute_id,
+                tags=["clarify_current_action", "literal_phrase"],
             )
 
         if last_action_type == "environment_step":
-            return ResponsePlan(
+            subroute_id = (
+                "crisis_demand_examples"
+                if route_id == "crisis"
+                else "sleep_environment"
+                if route_id == "sueno"
+                else "child_reduce_stimuli"
+                if route_id == "apoyo_infancia_neurodivergente"
+                else "what_type"
+            )
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id=subroute_id,
                 goal="clarify_current_action",
                 tone="claro_directo",
                 validation="",
                 main_response=self._environment_examples_response(route_id),
                 optional_followup="Elige solo una y cambia esa primero.",
-                tags=[route_id, "clarify_current_action", "environment_examples"],
+                state_subroute_id=active_subroute or subroute_id,
+                tags=["clarify_current_action", "environment_examples"],
             )
 
         if last_action_type == "grounding_step":
-            return ResponsePlan(
+            subroute_id = "anxiety_initial_grounding" if route_id == "ansiedad" else "what_type"
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id=subroute_id,
                 goal="clarify_current_action",
                 tone="claro_directo",
                 validation="",
                 main_response=(
                     "Hazlo literal: pies en el piso, suelta el aire mas largo una vez y mira tres cosas alrededor."
                 ),
-                tags=[route_id, "clarify_current_action", "grounding"],
+                state_subroute_id=active_subroute or subroute_id,
+                tags=["clarify_current_action", "grounding"],
             )
 
         if last_action_type == "sleep_step":
-            return ResponsePlan(
+            subroute_id = active_subroute or "sleep_followup"
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id=subroute_id,
                 goal="clarify_current_action",
                 tone="claro_directo",
                 validation="",
                 main_response=(
                     "Haz una sola accion real de sueño: baja la luz o la pantalla y deja 5 a 10 minutos sin exigencia."
                 ),
-                tags=[route_id, "clarify_current_action", "sleep"],
+                state_subroute_id=active_subroute or subroute_id,
+                tags=["clarify_current_action", "sleep"],
             )
 
         if last_action_type in {"executive_step", "action_step"} and "linea de que" in normalized:
-            return ResponsePlan(
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id="executive_linea_de_que",
                 goal="clarify_current_action",
                 tone="claro_directo",
                 validation="",
@@ -1468,35 +1750,48 @@ class SupportFlowEngine:
                 optional_followup=(
                     "Si no sabes cual, escribe solo el nombre de la materia o dime el nombre y partimos desde ahi."
                 ),
-                tags=[route_id, "clarify_current_action", "line_start"],
+                state_subroute_id=active_subroute or "executive_linea_de_que",
+                tags=["clarify_current_action", "line_start"],
             )
 
         if last_action_type in {"executive_step", "action_step"} and "por donde" in normalized:
-            return ResponsePlan(
+            subroute_id = "executive_no_se_que_toca" if route_id == "bloqueo_ejecutivo" else "where_do_i_start"
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id=subroute_id,
                 goal="clarify_current_action",
                 tone="claro_directo",
                 validation="",
                 main_response=self._starting_point_response(route_id),
-                tags=[route_id, "clarify_current_action", "starting_point"],
+                state_subroute_id=active_subroute or subroute_id,
+                tags=["clarify_current_action", "starting_point"],
             )
 
         if last_action_type in {"executive_step", "action_step"}:
-            return ResponsePlan(
+            subroute_id = "executive_visible_next_step" if route_id == "bloqueo_ejecutivo" else "what_type"
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id=subroute_id,
                 goal="clarify_current_action",
                 tone="claro_directo",
                 validation="",
                 main_response=self._simple_action_explanation(route_id, instruction),
                 optional_followup="Haz solo eso primero.",
-                tags=[route_id, "clarify_current_action", "action_step"],
+                state_subroute_id=active_subroute or subroute_id,
+                tags=["clarify_current_action", "action_step"],
             )
 
-        return ResponsePlan(
+        fallback_subroute = active_subroute or "i_dont_understand"
+        return self._make_engine_plan(
+            route_id=route_id,
+            subroute_id=fallback_subroute,
             goal="clarify_current_action",
             tone="claro_directo",
             validation="",
             main_response=self._simple_action_explanation(route_id, instruction),
             optional_followup="Haz solo eso y luego vemos si hace falta algo mas.",
-            tags=[route_id, "clarify_current_action"],
+            state_subroute_id=active_subroute or fallback_subroute,
+            tags=["clarify_current_action"],
         )
 
     def _build_blocked_followup_plan(
@@ -1505,34 +1800,72 @@ class SupportFlowEngine:
         normalized: str,
         action_memory: Dict[str, Any],
     ) -> Optional[ResponsePlan]:
-        del action_memory
+        active_subroute = str(action_memory.get("active_subroute_id") or "").strip() or None
 
         if route_id == "bloqueo_ejecutivo":
             if "no se que toca" in normalized or "no se que sigue" in normalized or "no se que hacer" in normalized:
-                return ResponsePlan(
+                return self._make_engine_plan(
+                    route_id=route_id,
+                    subroute_id="executive_no_se_que_toca",
                     goal="lower_demand_for_block",
                     tone="claro_directo",
                     validation="",
                     main_response="Haz solo esto: abre la materia o tarea que mas urge hoy.",
                     optional_followup="Si no sabes cual, dime el nombre de una materia y partimos desde ahi.",
-                    tags=["bloqueo", "lower_demand", "direct_answer"],
+                    state_subroute_id="executive_no_se_que_toca",
+                    tags=["lower_demand", "direct_answer"],
                 )
-            return ResponsePlan(
+            if "no puedo empezar" in normalized or active_subroute == "executive_no_puedo_empezar":
+                return self._make_engine_plan(
+                    route_id=route_id,
+                    subroute_id="executive_no_puedo_empezar",
+                    goal="lower_demand_for_block",
+                    tone="claro_directo",
+                    validation="",
+                    main_response="Haz solo esto: abre el archivo o cuaderno y escribe solo el titulo.",
+                    optional_followup="Con eso ya no esta en cero.",
+                    state_subroute_id="executive_no_puedo_empezar",
+                    tags=["lower_demand", "direct_answer"],
+                )
+            if "decide tu" in normalized or "elige tu" in normalized or active_subroute == "executive_decide_for_user":
+                return self._make_engine_plan(
+                    route_id=route_id,
+                    subroute_id="executive_decide_for_user",
+                    goal="lower_demand_for_block",
+                    tone="claro_directo",
+                    validation="",
+                    main_response="No decidas mas. Abre la tarea mas corta o la que vence primero y escribe solo el titulo.",
+                    optional_followup="Si quieres, despues te doy la siguiente linea.",
+                    state_subroute_id="executive_decide_for_user",
+                    tags=["lower_demand", "direct_answer"],
+                )
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id="executive_initial",
                 goal="lower_demand_for_block",
                 tone="claro_directo",
                 validation="",
                 main_response="Haz solo esto: abre una sola materia o tarea. Nada mas.",
                 optional_followup="Si no sabes cual elegir, yo te ayudo a escoger la mas urgente.",
-                tags=["bloqueo", "lower_demand", "direct_answer"],
+                state_subroute_id=active_subroute or "executive_initial",
+                tags=["lower_demand", "direct_answer"],
             )
 
         if route_id == "sueno":
-            return ResponsePlan(
+            sleep_subroute = (
+                "sleep_insomnia"
+                if self._contains_any(normalized, ["no puedo dormir", "insomnio", "desvelo"])
+                else active_subroute or "sleep_initial"
+            )
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id=sleep_subroute,
                 goal="one_sleep_step",
                 tone="claro_directo",
                 validation="",
                 main_response="Haz una sola accion real: baja la luz o apaga la pantalla y deja 5 a 10 minutos sin exigencia.",
-                tags=["sueno", "one_step", "direct_answer"],
+                state_subroute_id=sleep_subroute,
+                tags=["one_step", "direct_answer"],
             )
 
         return None
@@ -1547,6 +1880,12 @@ class SupportFlowEngine:
     ) -> Optional[ResponsePlan]:
         previous_state = dict(previous_frame.get("support_flow_state") or {})
         previous_count = int(previous_state.get("action_followup_count", 0) or 0)
+        active_subroute = str(
+            previous_state.get("active_subroute_id")
+            or previous_state.get("state_subroute_id")
+            or previous_state.get("subroute_id")
+            or ""
+        ).strip() or None
 
         if self._should_force_followup_exit(previous_state=previous_state, action_memory=action_memory):
             return self._build_followup_exit_plan(
@@ -1556,44 +1895,69 @@ class SupportFlowEngine:
             )
 
         if route_id == "crisis" and previous_count >= 1 and normalized == "ya":
-            return ResponsePlan(
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id="crisis_close_temporarily",
                 goal="hold_line",
                 tone="claro_directo",
                 validation="",
                 main_response="Bien. Por ahora no agregues otra indicacion: sostén la frase breve y el entorno mas bajo un momento.",
                 optional_followup="Si vuelve a subir o no baja nada, ahi si cambiamos una sola cosa o cerramos por ahora.",
                 close_softly=True,
-                tags=["crisis", "hold", "post_action_followup"],
+                state_subroute_id="crisis_close_temporarily",
+                tags=["hold", "post_action_followup"],
             )
 
         if route_id == "ansiedad":
-            return ResponsePlan(
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id="anxiety_binary_decision",
                 goal="next_distinct_step",
                 tone="claro_directo",
                 validation="",
-                main_response="Ahora elige una sola presion real de hoy y dejala visible en una frase breve.",
-                optional_followup="No abras otra cosa todavia.",
-                tags=["ansiedad", "next_step", "post_action_followup"],
+                main_response="Ahora cierralo en una decision corta: o eso vence hoy, o no lo vas a mover por ahora.",
+                optional_followup="No abras otro frente todavia.",
+                state_subroute_id="anxiety_binary_decision",
+                tags=["next_step", "post_action_followup"],
             )
 
         if route_id == "bloqueo_ejecutivo":
-            return ResponsePlan(
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id="executive_visible_next_step",
                 goal="next_distinct_step",
                 tone="claro_directo",
                 validation="",
                 main_response="Ahora deja una sola salida visible: escribe solo el titulo o una primera linea minima.",
                 optional_followup="Si no sabes cual, dime la materia y te doy una.",
-                tags=["bloqueo", "next_step", "post_action_followup"],
+                state_subroute_id="executive_visible_next_step",
+                tags=["next_step", "post_action_followup"],
             )
 
         if route_id == "sueno":
-            return ResponsePlan(
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id="sleep_followup",
                 goal="hold_line",
                 tone="claro_directo",
                 validation="",
                 main_response="Ahora no sumes mas de una medida: sostén la baja de luz o pantalla 5 a 10 minutos.",
-                optional_followup="Si sigue igual despues, cambiamos de via sin meter todo junto.",
-                tags=["sueno", "hold", "post_action_followup"],
+                optional_followup="Si sigue igual despues, cambiamos de via, pero seguimos dentro del tema de sueno.",
+                state_subroute_id=active_subroute or "sleep_followup",
+                tags=["hold", "post_action_followup"],
+            )
+
+        if route_id == "apoyo_infancia_neurodivergente":
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id="child_co_regulation",
+                goal="hold_line",
+                tone="claro_directo",
+                validation="",
+                main_response="Ahora sosten una sola ayuda para tu hija/o: o presencia calmada, o frase corta, o menos estimulos.",
+                optional_followup="No metas varias cosas juntas. Mira si con una baja un poco.",
+                state_subroute_id="child_co_regulation",
+                tags=["hold", "post_action_followup"],
             )
 
         return None
@@ -1618,30 +1982,47 @@ class SupportFlowEngine:
         outcome: OutcomePolarity,
     ) -> ResponsePlan:
         if outcome in {"no_change", "worse"}:
-            return ResponsePlan(
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id="strategy_switch",
                 goal="switch_strategy",
                 tone="claro_directo",
                 validation="",
                 main_response=self._switch_strategy_message(route_id),
-                tags=[route_id, "followup_exit", "switch"],
+                state_subroute_id="strategy_switch",
+                tags=["followup_exit", "switch"],
             )
 
         if normalized == "ya" or route_id in {"crisis", "sueno"}:
-            return ResponsePlan(
+            subroute_id = "crisis_close_temporarily" if route_id == "crisis" else "pause_here"
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id=subroute_id,
                 goal="close_temporarily",
                 tone="claro_directo",
                 validation="",
                 main_response=self._close_temporarily_message(route_id),
                 close_softly=True,
-                tags=[route_id, "followup_exit", "close"],
+                state_subroute_id=subroute_id,
+                tags=["followup_exit", "close"],
             )
 
-        return ResponsePlan(
+        subroute_id = (
+            "anxiety_binary_decision"
+            if route_id == "ansiedad"
+            else "executive_decide_for_user"
+            if route_id == "bloqueo_ejecutivo"
+            else "enough_for_now"
+        )
+        return self._make_engine_plan(
+            route_id=route_id,
+            subroute_id=subroute_id,
             goal="decide_one_path",
             tone="claro_directo",
             validation="",
             main_response=self._decide_one_path_message(route_id),
-            tags=[route_id, "followup_exit", "decide"],
+            state_subroute_id=subroute_id,
+            tags=["followup_exit", "decide"],
         )
 
     def _resolve_action_state(
@@ -1834,6 +2215,8 @@ class SupportFlowEngine:
             return "Baja una sola demanda concreta: ruido, gente cerca, preguntas o exigencias, luces o contacto"
         if route_id == "sueno":
             return "Ajusta solo una cosa del entorno: luz, ruido o pantalla"
+        if route_id == "apoyo_infancia_neurodivergente":
+            return "Ajusta solo una cosa del entorno para tu hija/o: luz, ruido, gente o demandas"
         return "Ajusta solo una cosa del entorno: ruido, gente o exigencia"
 
     def _starting_point_response(self, route_id: Domain) -> str:
@@ -1846,6 +2229,8 @@ class SupportFlowEngine:
             return "Haz una sola cosa: abre la materia o tarea mas urgente de hoy."
         if route_id == "ansiedad" and not instruction:
             return "Haz una sola cosa: pies en el piso y una exhalacion larga."
+        if route_id == "apoyo_infancia_neurodivergente" and not instruction:
+            return "Haz una sola cosa por tu hija/o: o menos palabras, o menos estimulos, o una frase breve."
         if instruction:
             return f"La accion actual es esta: {instruction}"
         return "La accion actual es hacer una sola cosa pequeña y literal."
@@ -1855,6 +2240,8 @@ class SupportFlowEngine:
             return "Estoy aqui contigo. No hace falta hablar mucho ahora. Vamos a bajar esto juntos."
         if route_id == "ansiedad":
             return "Solo una cosa a la vez. Ahora no tengo que resolver todo."
+        if route_id == "apoyo_infancia_neurodivergente":
+            return "No tienes que resolverlo todo ahorita. Vamos con una sola parte."
         return "Vamos paso a paso. Solo una cosa ahora."
 
     def _switch_strategy_message(self, route_id: Domain) -> str:
@@ -1866,6 +2253,8 @@ class SupportFlowEngine:
             return "No vamos a empujar mas el mismo paso. Dime la materia y te doy una sola linea de arranque."
         if route_id == "sueno":
             return "No seguimos intentando lo mismo. Cambia a una sola medida real: menos pantalla o menos luz por unos minutos."
+        if route_id == "apoyo_infancia_neurodivergente":
+            return "No vamos a insistir por la misma via. Cambiemos a una sola ayuda distinta para tu hija/o: frase corta, presencia calmada o menos estimulos."
         return "Cambiemos a una sola via distinta, sin abrir mas de un frente."
 
     def _close_temporarily_message(self, route_id: Domain) -> str:
@@ -1873,13 +2262,17 @@ class SupportFlowEngine:
             return "Por ahora no metas otro paso. Sosten la frase breve y el entorno mas bajo un momento, y cerramos ahi por ahora."
         if route_id == "sueno":
             return "Ya no sumes otra medida. Sosten luz baja o pantalla fuera 5 a 10 minutos y por ahora cerramos ahi."
+        if route_id == "apoyo_infancia_neurodivergente":
+            return "Por ahora basta con una sola ayuda para tu hija/o. Sostenla un momento y cerramos ahi temporalmente."
         return "Por ahora no hace falta meter otro paso. Sosten esta accion un momento y cerramos aqui temporalmente."
 
     def _decide_one_path_message(self, route_id: Domain) -> str:
         if route_id == "ansiedad":
-            return "No vamos a abrir mas pasos ahorita. Elige una sola via: o sostienes esto un minuto y cerramos por ahora, o me dices la presion principal y vemos solo esa."
+            return "No vamos a abrir mas pasos ahorita. O sostienes esto un minuto y cerramos por ahora, o me dices la preocupacion principal y vemos solo esa."
         if route_id == "bloqueo_ejecutivo":
             return "No metas otro paso ahorita. O dejas solo la materia abierta y cerramos por ahora, o me dices la materia y te doy una sola linea."
+        if route_id == "apoyo_infancia_neurodivergente":
+            return "No metas varias ayudas al mismo tiempo. O sostienes una sola ayuda y observas, o cambiamos a una sola via distinta."
         return "Ahora toca una sola decision: o sostener esto por ahora, o cambiar a una sola via distinta."
 
     def _contains_any(self, normalized_text: str, phrases: List[str]) -> bool:
