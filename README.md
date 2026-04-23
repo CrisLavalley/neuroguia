@@ -97,7 +97,6 @@ Características:
 - interfaz con Streamlit
 
 ---
-
 ## 📁 Estructura del proyecto
 
 ```text
@@ -118,8 +117,8 @@ neuroguIA/
 ├── docs/
 └── validation_outputs/
 
-text```
 ---
-
 ### 👩‍💻 Autor:
 **Cristhianne De León Vargas**
+---
+
