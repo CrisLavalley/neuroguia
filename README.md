@@ -117,6 +117,8 @@ neuroguIA/
 ├── scripts/
 ├── docs/
 └── validation_outputs/
+
+```text
 ---
 
 ### 👩‍💻 Autor:
