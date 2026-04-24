@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 support_playbooks.py
 Catalogo conductual principal de NeuroGuIA.
@@ -10,6 +11,7 @@ Objetivo:
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple
@@ -212,19 +214,24 @@ def get_catalog_subroutes(route_id: Domain) -> Tuple[str, ...]:
 # Utilidades
 # =========================================================
 
-def normalize_text(text: str) -> str:
+def normalize_input(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", str(text or "").strip().lower())
     normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
     return " ".join(normalized.split())
 
 
+def normalize_text(text: str) -> str:
+    return normalize_input(text)
+
+
 def contains_any(text: str, phrases: Sequence[str]) -> bool:
-    t = normalize_text(text)
-    return any(normalize_text(phrase) in t for phrase in phrases)
+    t = normalize_input(text)
+    return any(normalize_input(phrase) in t for phrase in phrases)
 
 
 def _has_any(normalized_text: str, phrases: Sequence[str]) -> bool:
-    return any(normalize_text(phrase) in normalized_text for phrase in phrases)
+    return any(normalize_input(phrase) in normalized_text for phrase in phrases)
 
 
 def _text(signal: UserSignal) -> str:
@@ -583,7 +590,7 @@ def playbook_meta_question(signal: UserSignal) -> ResponsePlan:
             validation="",
             main_response=(
                 "Puedo ayudarte a bajar una crisis, aterrizar ansiedad, ordenar un bloqueo, "
-                "pensar el sueno y darte frases o pasos concretos."
+                "pensar el sueño y darte frases o pasos concretos."
             ),
             optional_followup="Si quieres, cuentame que esta pesando mas ahorita.",
             tags=["meta", "capabilities"],
@@ -777,8 +784,8 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
             goal="clarify_anxiety_step",
             tone="claro_calido",
             validation="Si, te lo digo directo.",
-            main_response="Haz solo esto: pies en el piso y suelta el aire mas largo una vez.",
-            next_step="Pies en el piso y una exhalacion larga",
+            main_response="Haz solo esto: pies en el piso y suelta el aire más largo una vez.",
+            next_step="Pies en el piso y una exhalación larga",
             micro_practice="grounding_exhale",
             tags=["ansiedad", "grounding"],
         )
@@ -790,8 +797,8 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
             goal="reduce_anxiety_now",
             tone="calido_contenedor",
             validation="Si, esto ya se siente demasiado.",
-            main_response="No vamos a resolver todo ahora. Primero vuelve un poco al cuerpo: pies en el piso y una exhalacion larga.",
-            next_step="Pies en el piso y una exhalacion larga",
+            main_response="No vamos a resolver todo ahora. Primero vuelve un poco al cuerpo: pies en el piso y una exhalación larga.",
+            next_step="Pies en el piso y una exhalación larga",
             micro_practice="grounding_exhale",
             optional_followup="Cuando baje un poco, hacemos una sola accion visible.",
             tags=["ansiedad", "grounding"],
@@ -866,11 +873,11 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
         subroute_id="anxiety_initial_grounding",
         goal="initial_anxiety_support",
         tone="calido_contenedor",
-        validation="Tiene sentido que esto te este pesando.",
-        main_response="Vamos primero a bajar un poco la activacion: pies en el piso y una exhalacion un poco mas larga.",
-        next_step="Pies en el piso y una exhalacion larga",
+        validation="Sí, esto ya está pesando mucho.",
+        main_response="Baja un poco la activación con una sola acción: pies en el piso y una exhalación un poco más larga.",
+        next_step="Pies en el piso y una exhalación larga",
         micro_practice="grounding_exhale",
-        optional_followup="Despues vemos si hace falta una accion visible o una decision corta.",
+        optional_followup="Después vemos si hace falta una acción visible o una decisión corta.",
         tags=["ansiedad", "inicio"],
     )
 
@@ -1079,7 +1086,7 @@ def playbook_sleep(signal: UserSignal) -> ResponsePlan:
             tone="calido_claro",
             validation="Gracias por decirlo. No voy a repetirte lo mismo si asi no ayuda.",
             main_response=(
-                "Cambiemos de via dentro del sueno: si la mente no para, la sacamos al papel; "
+                "Cambiemos de vía dentro del sueño: si la mente no para, la sacamos al papel; "
                 "si el cuerpo esta arriba, bajamos cuerpo; si el entorno molesta, ajustamos una sola cosa."
             ),
             optional_followup="Si quieres, elijo yo por donde conviene empezar segun lo que mas pesa.",
@@ -1090,7 +1097,7 @@ def playbook_sleep(signal: UserSignal) -> ResponsePlan:
     if signal.turn_family == "followup_acceptance" or signal.turn_family == "post_action_followup" or signal.asks_for_next_step or signal.wants_to_continue:
         followup_text = {
             "sleep_mind_racing": "Despues de sacar eso al papel, deja una sola frase de cierre y no abras otro tema esta noche.",
-            "sleep_body_activated": "Ahora busca quietud, no sueno forzado: postura comoda, luz baja y respiracion sin esfuerzo.",
+            "sleep_body_activated": "Ahora busca quietud, no sueño forzado: postura cómoda, luz baja y respiración sin esfuerzo.",
             "sleep_environment": "Sosten ese ajuste unos minutos y no agregues otra medida todavia.",
             "sleep_insomnia": "Cuando sientas un poco menos de activacion, vuelve a la cama sin forzarlo.",
         }.get(track, "Ahora no sumes otra medida. Sosten la bajada de estimulo 5 a 10 minutos.")
@@ -1156,8 +1163,8 @@ def playbook_sleep(signal: UserSignal) -> ResponsePlan:
             goal="initial_sleep_body_support",
             tone="calido_suave",
             validation="Si, con el cuerpo tan arriba cuesta mucho bajar a dormir.",
-            main_response="Primero baja cuerpo, no sueno forzado: afloja mandibula, hombros y deja tres exhalaciones largas.",
-            next_step="Afloja mandibula, hombros y deja tres exhalaciones largas",
+            main_response="Primero baja cuerpo, no sueño forzado: afloja mandíbula, hombros y deja tres exhalaciones largas.",
+            next_step="Afloja mandíbula, hombros y deja tres exhalaciones largas",
             micro_practice="body_settle_exhale",
             optional_followup="Cuando el cuerpo ceda un poco, vuelves a intentar dormir.",
             tags=["sueno", "cuerpo_activado"],
@@ -1181,7 +1188,7 @@ def playbook_sleep(signal: UserSignal) -> ResponsePlan:
             goal="initial_sleep_insomnia_support",
             tone="calido_suave",
             validation="Si, el desvelo suele empeorar cuando tratamos de forzarlo.",
-            main_response="Si ya estas muy despierta/o, sal un momento de la pelea con el sueno: poca luz, sin pantalla y sin exigencia.",
+            main_response="Si ya estás muy despierta/o, sal un momento de la pelea con el sueño: poca luz, sin pantalla y sin exigencia.",
             next_step="Poca luz, sin pantalla y sin exigencia por unos minutos",
             optional_followup="Cuando baje un poco la activacion, vuelves a la cama.",
             tags=["sueno", "desvelo"],
@@ -1191,7 +1198,7 @@ def playbook_sleep(signal: UserSignal) -> ResponsePlan:
         subroute_id="sleep_initial",
         goal="initial_sleep_support",
         tone="calido_suave",
-        validation="Si, el sueno puede mover todo lo demas.",
+        validation="Sí, el sueño puede mover todo lo demás.",
         main_response="Vamos con algo concreto: baja una sola fuente de estimulo como luz, ruido o pantalla.",
         next_step="Baja una sola fuente de estimulo como luz, ruido o pantalla",
         optional_followup="Si quieres, luego vemos si el peso esta mas en la mente, el cuerpo o el entorno.",
@@ -1649,7 +1656,7 @@ def playbook_low_energy(signal: UserSignal) -> ResponsePlan:
         goal="support_low_energy_without_forcing",
         tone="calido_suave",
         validation="Si, esto puede dejarte sin energia hasta para lo pequeno.",
-        main_response="No hace falta empujarte demasiado ahora. Cambia de postura o apoya los pies en el piso y quedate ahi un momento.",
+        main_response="No hace falta empujarte demasiado ahora. Cambia de postura y quédate ahí un momento.",
         optional_followup="Si quieres, despues vemos si hay una sola cosa pequena que si sea posible hoy.",
         tags=["baja_energia"],
     )
@@ -1686,7 +1693,7 @@ PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
     "ansiedad": PlaybookSpec(
         route_id="ansiedad",
         tone_objective="calido_contenedor",
-        validation_base="Tiene sentido que esto te este pesando.",
+        validation_base="Sí, esto puede estar pesando mucho.",
         max_steps=4,
         expected_user_responses=["no puedo con todo", "y luego", "no me sirve", "ya aflojo un poco", "paramos aqui"],
         if_not_understood="clarification_request",
@@ -1708,7 +1715,7 @@ PLAYBOOK_SPECS: Dict[Domain, PlaybookSpec] = {
     "sueno": PlaybookSpec(
         route_id="sueno",
         tone_objective="calido_suave",
-        validation_base="Si, el sueno puede mover todo lo demas.",
+        validation_base="Sí, el sueño puede mover todo lo demás.",
         max_steps=4,
         expected_user_responses=["mente acelerada", "desvelo", "ya, que mas", "sigue igual", "paramos aqui"],
         if_not_understood="clarification_request",
@@ -2003,7 +2010,7 @@ if __name__ == "__main__":
     examples = [
         infer_basic_signal("Esta ocurriendo una crisis y necesito ayuda", "crisis", "new_request"),
         infer_basic_signal("que le digo?", "crisis", "literal_phrase_request"),
-        infer_basic_signal("mejor dime que pastillas tomar", "sueno", "specific_action_request"),
+        infer_basic_signal("mejor dime qué pastillas tomar", "sueno", "specific_action_request"),
         infer_basic_signal("quien eres?", "meta_question", "meta_question"),
         infer_basic_signal("no puedo ni empezar", "bloqueo_ejecutivo", "blocked_followup"),
     ]

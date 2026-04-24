@@ -1,8 +1,19 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import re
 import unicodedata
 from typing import Any, Dict, List, Optional
+
+
+def normalize_input(text: Optional[str]) -> str:
+    """Normaliza solo para matching interno; no debe usarse como salida visible."""
+
+    normalized = " ".join((text or "").strip().lower().split())
+    normalized = unicodedata.normalize("NFKD", normalized)
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    return " ".join(normalized.split())
 
 
 class ResponseCurator:
@@ -178,6 +189,46 @@ class ResponseCurator:
         "como le digo",
     }
 
+    GROUNDING_ALLOWED_SUBROUTES = {
+        "ansiedad grounding",
+        "anxiety initial grounding",
+    }
+
+    GENERIC_SUPPORT_BLOCK_PATTERNS = (
+        r"\btiene sentido que esto te est(?:e)? pesando\b",
+        r"\bvamos primero a bajar(?: un poco)? la activacion\b",
+    )
+
+    GENERIC_GROUNDING_BLOCK_PATTERNS = (
+        r"\bpies en el piso\b",
+        r"\bapoya los pies\b",
+        r"\bexhalacion(?: un poco)? mas larga\b",
+        r"\bexhalacion larga\b",
+        r"\bsuelta el aire mas largo\b",
+        r"\bsuelta el aire una vez\b",
+    )
+
+    CRISIS_FORBIDDEN_PATTERNS = (
+        r"\bpies en el piso\b",
+        r"\bapoya los pies\b",
+        r"\brespiracion\b",
+        r"\binhala\b",
+        r"\bexhala\b",
+        r"\bexhalacion\b",
+        r"\bansiedad\b",
+        r"\bintrospeccion\b",
+        r"\bemocion(?:al|es)?\b",
+        r"\bque sientes\b",
+        r"\bvuelve al cuerpo\b",
+    )
+
+    SLEEP_FORBIDDEN_PATTERNS = (
+        r"\bpies en el piso\b",
+        r"\bapoya los pies\b",
+        r"\btiene sentido que esto te este pesando\b",
+        r"\bvamos primero a bajar(?: un poco)? la activacion\b",
+    )
+
     def curate(
         self,
         llm_result: Optional[Dict[str, Any]] = None,
@@ -199,10 +250,39 @@ class ResponseCurator:
         stage_result = stage_result or {}
         state_analysis = state_analysis or {}
         category_analysis = category_analysis or {}
+        intent_analysis = intent_analysis or {}
         conversation_control = conversation_control or {}
         conversation_frame = conversation_frame or {}
         chat_history = chat_history or []
         response_package = response_package or {}
+
+        locked_support_flow_plan = self._locked_support_flow_plan(
+            decision_payload=decision_payload,
+            response_package=response_package,
+            conversation_control=conversation_control,
+            conversation_frame=conversation_frame,
+        )
+        if locked_support_flow_plan:
+            curated_text = self.humanize_without_overwriting(locked_support_flow_plan)
+            route_id = str(locked_support_flow_plan.get("route_id") or "").strip()
+            subroute_id = self._support_flow_subroute(locked_support_flow_plan)
+            return {
+                "approved": True,
+                "quality_score": 0.97,
+                "curated_response_text": curated_text,
+                "curated_response_structure": self._extract_structure(curated_text),
+                "source_provider": "local_support_locked_humanizer",
+                "used_stub_fallback": bool(llm_result.get("used_stub_fallback", False)),
+                "used_llm": False,
+                "used_local_humanizer": True,
+                "should_learn_if_good": False,
+                "curation_notes": [
+                    "support_flow_lock=preserved",
+                    f"route_id={route_id}" if route_id else "route_id=unknown",
+                    f"selected_subroute={subroute_id}" if subroute_id else "selected_subroute=unknown",
+                    "flow_engine_decides_what=curator_decides_how",
+                ],
+            }
 
         raw_text = self._extract_raw_text(llm_result)
         curated_text = self._clean_text(raw_text)
@@ -274,6 +354,461 @@ class ResponseCurator:
                 chat_history=chat_history,
             ) + final_control_notes,
         }
+
+    def humanize_support_flow_response(
+        self,
+        response_package: Optional[Dict[str, Any]] = None,
+        support_flow_response_plan: Optional[Dict[str, Any]] = None,
+        llm_result: Optional[Dict[str, Any]] = None,
+        conversation_control: Optional[Dict[str, Any]] = None,
+        conversation_frame: Optional[Dict[str, Any]] = None,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        response_package = response_package or {}
+        support_flow_response_plan = support_flow_response_plan or {}
+        conversation_control = conversation_control or {}
+        conversation_frame = conversation_frame or {}
+        chat_history = chat_history or []
+        llm_result = llm_result or {}
+
+        if support_flow_response_plan:
+            curated_text = self.humanize_without_overwriting(support_flow_response_plan)
+            route_id = str(support_flow_response_plan.get("route_id") or "").strip()
+            subroute_id = self._support_flow_subroute(support_flow_response_plan)
+            return {
+                "approved": True,
+                "quality_score": 0.97,
+                "curated_response_text": curated_text,
+                "curated_response_structure": self._extract_structure(curated_text),
+                "source_provider": "local_support_locked_humanizer",
+                "used_stub_fallback": bool(llm_result.get("used_stub_fallback", False)),
+                "used_llm": False,
+                "used_local_humanizer": True,
+                "should_learn_if_good": False,
+                "curation_notes": [
+                    "support_flow_humanization=locked_local_plan",
+                    f"route_id={route_id}" if route_id else "route_id=unknown",
+                    f"selected_subroute={subroute_id}" if subroute_id else "selected_subroute=unknown",
+                    "flow_engine_decides_what=curator_decides_how",
+                ],
+            }
+
+        llm_text = ""
+        used_llm = False
+        if llm_result and not bool(llm_result.get("used_stub_fallback", False)):
+            llm_text = self._extract_raw_text(llm_result)
+            llm_text = self._finalize_support_flow_text(
+                text=llm_text,
+                support_flow_response_plan=support_flow_response_plan,
+            )
+            if self._support_flow_llm_text_is_usable(
+                text=llm_text,
+                support_flow_response_plan=support_flow_response_plan,
+            ):
+                used_llm = True
+
+        if used_llm:
+            curated_text = llm_text
+            source_provider = str(llm_result.get("provider") or "openai").strip() or "openai"
+            notes = ["support_flow_humanization=llm_redaction"]
+            quality_score = 0.94
+        else:
+            curated_text = self._build_local_support_flow_text(
+                support_flow_response_plan=support_flow_response_plan,
+                response_package=response_package,
+                conversation_control=conversation_control,
+                conversation_frame=conversation_frame,
+                chat_history=chat_history,
+            )
+            source_provider = "local_support_humanizer"
+            notes = ["support_flow_humanization=local_fallback"]
+            if llm_result and bool(llm_result.get("used_stub_fallback", False)):
+                notes.append("support_flow_humanization=llm_stub_ignored")
+            quality_score = 0.82
+
+        return {
+            "approved": True,
+            "quality_score": quality_score,
+            "curated_response_text": curated_text,
+            "curated_response_structure": self._extract_structure(curated_text),
+            "source_provider": source_provider,
+            "used_stub_fallback": bool(llm_result.get("used_stub_fallback", False)),
+            "used_llm": used_llm,
+            "used_local_humanizer": not used_llm,
+            "should_learn_if_good": False,
+            "curation_notes": notes,
+        }
+
+    def humanize_without_overwriting(self, plan: Optional[Dict[str, Any]]) -> str:
+        plan = dict(plan or {})
+        parts: List[str] = []
+        for key in ("validation", "main_response"):
+            value = str(plan.get(key) or "").strip()
+            if value:
+                parts.append(value)
+        literal_phrase = str(plan.get("literal_phrase") or "").strip()
+        if literal_phrase:
+            parts.append(f'"{literal_phrase}"')
+        optional_followup = str(plan.get("optional_followup") or "").strip()
+        if optional_followup:
+            parts.append(optional_followup)
+
+        text = " ".join(part for part in parts if part).strip()
+        if not text:
+            text = str(plan.get("next_step") or plan.get("micro_practice") or "").strip()
+        return self._finalize_support_flow_text(text=text, support_flow_response_plan=plan)
+
+    def _locked_support_flow_plan(
+        self,
+        decision_payload: Dict[str, Any],
+        response_package: Dict[str, Any],
+        conversation_control: Dict[str, Any],
+        conversation_frame: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        candidates: List[Any] = [
+            decision_payload.get("support_flow_response_plan"),
+            response_package.get("support_flow_response_plan"),
+        ]
+        response_metadata = dict(response_package.get("response_metadata", {}) or {})
+        candidates.append(response_metadata.get("response_plan"))
+
+        selected_subroute = str(
+            decision_payload.get("selected_subroute")
+            or decision_payload.get("selected_strategy")
+            or conversation_control.get("subroute_id")
+            or conversation_frame.get("subroute_id")
+            or response_package.get("suggested_subroute")
+            or response_metadata.get("subroute_id")
+            or ""
+        ).strip()
+        has_support_flow_lock = (
+            selected_subroute
+            or str(decision_payload.get("decision_mode") or "").strip() == "support_flow_engine"
+            or bool(response_package.get("is_flow_engine_response"))
+            or str(response_metadata.get("source") or "").strip() == "support_flow_engine"
+        )
+
+        for candidate in candidates:
+            if isinstance(candidate, dict) and candidate and has_support_flow_lock:
+                return dict(candidate)
+        return {}
+
+    def _support_flow_subroute(self, plan: Dict[str, Any]) -> str:
+        return str(
+            plan.get("subroute_id")
+            or plan.get("state_subroute_id")
+            or plan.get("selected_subroute")
+            or plan.get("goal")
+            or ""
+        ).strip()
+
+    def _support_flow_allows_grounding(self, plan: Dict[str, Any]) -> bool:
+        route_id = normalize_input(str(plan.get("route_id") or ""))
+        subroute_id = normalize_input(self._support_flow_subroute(plan))
+        return route_id == "ansiedad" and subroute_id in self.GROUNDING_ALLOWED_SUBROUTES
+
+    def _support_flow_block_patterns(self, plan: Dict[str, Any]) -> List[str]:
+        route_id = normalize_input(str(plan.get("route_id") or ""))
+        patterns: List[str] = []
+        if not self._support_flow_allows_grounding(plan):
+            patterns.extend(self.GENERIC_SUPPORT_BLOCK_PATTERNS)
+            patterns.extend(self.GENERIC_GROUNDING_BLOCK_PATTERNS)
+        if route_id == "crisis":
+            patterns.extend(self.CRISIS_FORBIDDEN_PATTERNS)
+        elif route_id == "sueno":
+            patterns.extend(self.SLEEP_FORBIDDEN_PATTERNS)
+        return patterns
+
+    def _support_flow_has_blocked_content(self, text: str, plan: Dict[str, Any]) -> bool:
+        normalized = normalize_input(text)
+        return any(re.search(pattern, normalized) for pattern in self._support_flow_block_patterns(plan))
+
+    def _enforce_support_flow_contract(self, text: str, plan: Dict[str, Any]) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned or not plan:
+            return cleaned
+
+        patterns = self._support_flow_block_patterns(plan)
+        if not patterns:
+            return cleaned
+
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
+        kept: List[str] = []
+        for sentence in sentences:
+            normalized_sentence = normalize_input(sentence)
+            if any(re.search(pattern, normalized_sentence) for pattern in patterns):
+                continue
+            kept.append(sentence)
+
+        if kept:
+            cleaned = " ".join(kept).strip()
+        elif self._support_flow_has_blocked_content(cleaned, plan):
+            cleaned = self._support_flow_domain_fallback(plan)
+
+        return re.sub(r"\s{2,}", " ", cleaned).strip(" ,")
+
+    def _support_flow_domain_fallback(self, plan: Dict[str, Any]) -> str:
+        route_id = normalize_input(str(plan.get("route_id") or ""))
+        if route_id == "crisis":
+            return "Baja una sola demanda del entorno y usa pocas palabras."
+        if route_id == "ansiedad":
+            return "Abre una nota y escribe una sola línea con lo que pesa más ahora."
+        if route_id == "sueno":
+            return "Ajusta una sola cosa del entorno: luz, ruido o pantalla."
+        if route_id == "bloqueo_ejecutivo":
+            return "Deja una sola acción visible y mínima."
+        return str(plan.get("main_response") or plan.get("next_step") or "").strip()
+
+    def _support_flow_llm_text_is_usable(
+        self,
+        text: str,
+        support_flow_response_plan: Dict[str, Any],
+    ) -> bool:
+        candidate = self._normalize(text)
+        if not candidate or self._response_is_empty_or_incoherent(text):
+            return False
+        if self._support_flow_has_blocked_content(text, support_flow_response_plan):
+            return False
+        literal_phrase = str(support_flow_response_plan.get("literal_phrase") or "").strip()
+        if literal_phrase:
+            literal_norm = self._normalize(literal_phrase)
+            if literal_norm and literal_norm not in candidate:
+                return False
+        return True
+
+    def _build_local_support_flow_text(
+        self,
+        support_flow_response_plan: Dict[str, Any],
+        response_package: Dict[str, Any],
+        conversation_control: Dict[str, Any],
+        conversation_frame: Dict[str, Any],
+        chat_history: List[Dict[str, Any]],
+    ) -> str:
+        del conversation_control, conversation_frame
+
+        parts: List[str] = []
+        validation = str(support_flow_response_plan.get("validation") or "").strip()
+        main_response = str(support_flow_response_plan.get("main_response") or "").strip()
+        literal_phrase = str(support_flow_response_plan.get("literal_phrase") or "").strip()
+        optional_followup = str(support_flow_response_plan.get("optional_followup") or "").strip()
+        fallback_text = str(
+            response_package.get("response")
+            or response_package.get("text")
+            or ""
+        ).strip()
+
+        if validation:
+            parts.append(validation)
+        if main_response:
+            parts.append(main_response)
+        elif fallback_text:
+            parts.append(fallback_text)
+        if literal_phrase:
+            parts.append(f'"{literal_phrase}"')
+        if optional_followup:
+            parts.append(optional_followup)
+
+        text = " ".join(part for part in parts if part).strip()
+        if not text:
+            text = fallback_text
+
+        text = self._finalize_support_flow_text(
+            text=text,
+            support_flow_response_plan=support_flow_response_plan,
+        )
+        if self._looks_recycled_against_history(text, chat_history):
+            text = self._support_flow_non_repetitive_variant(
+                text=text,
+                support_flow_response_plan=support_flow_response_plan,
+                chat_history=chat_history,
+            )
+        return text
+
+    def _support_flow_non_repetitive_variant(
+        self,
+        text: str,
+        support_flow_response_plan: Dict[str, Any],
+        chat_history: List[Dict[str, Any]],
+    ) -> str:
+        current = self._normalize(text)
+        if not current:
+            return text
+        goal = str(support_flow_response_plan.get("goal") or "").strip()
+        if goal == "answer_about_system_briefly":
+            return self._pick_non_repeated_variant(
+                [
+                    "Sí, claro. Aquí estoy contigo.",
+                    "Sí. Puedes hablar conmigo aquí cuando lo necesites.",
+                ],
+                chat_history,
+            )
+        if goal in {"repair_after_frustration", "change_strategy_without_pressure"}:
+            return self._pick_non_repeated_variant(
+                [
+                    "Entiendo la frustración. No voy a insistir con lo mismo; vamos a cambiar de forma contigo.",
+                    "Gracias por decirlo claro. Dejamos esa vía y busco otra más útil para ti.",
+                ],
+                chat_history,
+            )
+        return text
+
+    def _finalize_support_flow_text(
+        self,
+        text: str,
+        support_flow_response_plan: Dict[str, Any],
+    ) -> str:
+        cleaned = self._clean_text(text)
+        cleaned = self._light_cleanup_response(cleaned)
+        cleaned = self._apply_support_flow_phrase_fixes(cleaned)
+        cleaned = self._remove_support_flow_rigid_language(cleaned)
+        cleaned = self._enforce_support_flow_contract(cleaned, support_flow_response_plan)
+        cleaned = self._clean_text(cleaned)
+        cleaned = self._light_cleanup_response(cleaned)
+        cleaned = re.sub(r'"([^"]*)"', lambda match: f'"{match.group(1).strip()}"', cleaned)
+        cleaned = re.sub(r'([.!?])"(?=[A-ZÁÉÍÓÚÑ¿¡])', r'\1 "', cleaned)
+
+        if not cleaned:
+            fallback_main = str(support_flow_response_plan.get("main_response") or "").strip()
+            cleaned = self._apply_support_flow_phrase_fixes(fallback_main)
+            cleaned = self._enforce_support_flow_contract(cleaned, support_flow_response_plan)
+            cleaned = self._clean_text(cleaned)
+        return cleaned
+
+    def _remove_support_flow_rigid_language(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        replacements = [
+            ("elige una sola presion real para hoy", "decidelo con una sola cosa por ahora"),
+            ("la respuesta mas util", ""),
+            ("lo mas util", ""),
+            ("nombrar que el momento esta pesado", "decirlo claro"),
+            ("mantenerlo simple y concreto", "bajarlo a algo que si ayude"),
+        ]
+        normalized = self._normalize(cleaned)
+        for old, new in replacements:
+            if old in normalized:
+                cleaned = re.sub(re.escape(old), new, cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned.strip(" ,")
+
+    def _apply_support_flow_phrase_fixes(self, text: str) -> str:
+        fixed = str(text or "").strip()
+        if not fixed:
+            return ""
+
+        mojibake_replacements = [
+            ("Ã¡", "á"),
+            ("Ã©", "é"),
+            ("Ã­", "í"),
+            ("Ã³", "ó"),
+            ("Ãº", "ú"),
+            ("Ã±", "ñ"),
+            ("ń", "ñ"),
+            ("Ń", "Ñ"),
+            ("Â¿", "¿"),
+            ("Â¡", "¡"),
+        ]
+        for old, new in mojibake_replacements:
+            fixed = fixed.replace(old, new)
+
+        direct_replacements = [
+            ("Si, ", "Sí, "),
+            ("si, ", "sí, "),
+            ("Aqui ", "Aquí "),
+            ("aqui ", "aquí "),
+            (" Aqui", " Aquí"),
+            (" aqui", " aquí"),
+            ("Ahi", "Ahí"),
+            (" ahi", " ahí"),
+            ("Asi", "Así"),
+            (" asi", " así"),
+            ("Tambien", "También"),
+            (" tambien", " también"),
+            ("Demas", "Demás"),
+            (" demas", " demás"),
+            ("Despues", "Después"),
+            (" despues", " después"),
+            ("Practica", "Práctica"),
+            ("practica", "práctica"),
+            ("Meditacion", "Meditación"),
+            ("meditacion", "meditación"),
+            ("Respiracion", "Respiración"),
+            ("respiracion", "respiración"),
+            ("Accion", "Acción"),
+            ("accion", "acción"),
+            ("Opcion", "Opción"),
+            ("opcion", "opción"),
+            ("Decision", "Decisión"),
+            ("decision", "decisión"),
+            ("Comunicacion", "Comunicación"),
+            ("comunicacion", "comunicación"),
+            ("Indicacion", "Indicación"),
+            ("indicacion", "indicación"),
+            ("Indicaciones", "Indicaciones"),
+            ("indicaciones", "indicaciones"),
+            ("Preocupacion", "Preocupación"),
+            ("preocupacion", "preocupación"),
+            ("Frustracion", "Frustración"),
+            ("frustracion", "frustración"),
+            ("Situacion", "Situación"),
+            ("situacion", "situación"),
+            ("Estimulo", "Estímulo"),
+            ("estimulo", "estímulo"),
+            ("Estimulos", "Estímulos"),
+            ("estimulos", "estímulos"),
+            ("Sueno", "Sueño"),
+            (" sueno", " sueño"),
+            ("Todavia", "Todavía"),
+            ("todavia", "todavía"),
+            ("Ayudala", "Ayúdala"),
+            ("ayudala", "ayúdala"),
+            ("Ayudalo", "Ayúdalo"),
+            ("ayudalo", "ayúdalo"),
+            ("frio", "frío"),
+            ("Mandibula", "Mandíbula"),
+            ("mandibula", "mandíbula"),
+            ("pantalla fuera", "pantalla fuera"),
+        ]
+        for old, new in direct_replacements:
+            fixed = fixed.replace(old, new)
+
+        regex_replacements = [
+            (r"\bmas\b", "más"),
+            (r"\besta bien\b", "está bien"),
+            (r"\bEsta bien\b", "Está bien"),
+            (r"\besta noche\b", "esta noche"),
+            (r"\bmedida real\b", "medida real"),
+            (r"\ben torno\b", "entorno"),
+            (r"\bquedate\b", "quédate"),
+            (r"\bQuedate\b", "Quédate"),
+            (r"\btecnica\b", "técnica"),
+            (r"\btecnicas\b", "técnicas"),
+            (r"\bcalida\b", "cálida"),
+            (r"\bfacil\b", "fácil"),
+            (r"\brapido\b", "rápido"),
+            (r"\bminima\b", "mínima"),
+            (r"\btitulo\b", "título"),
+            (r"\blinea\b", "línea"),
+            (r"\bvia\b", "vía"),
+            (r"\bsosten\b", "sostén"),
+            (r"\bSosten\b", "Sostén"),
+            (r"\bcierralo\b", "ciérralo"),
+            (r"\bCierralo\b", "Ciérralo"),
+            (r"\bdejala\b", "déjala"),
+            (r"\bDejala\b", "Déjala"),
+            (r"\bdejalo\b", "déjalo"),
+            (r"\bDejalo\b", "Déjalo"),
+            (r"\bexplicacion\b", "explicación"),
+            (r"\bexplicaciones\b", "explicaciones"),
+            (r"\btu hija/o\b", "tu hija o hijo"),
+        ]
+        for pattern, replacement in regex_replacements:
+            fixed = re.sub(pattern, replacement, fixed, flags=re.IGNORECASE)
+
+        fixed = re.sub(r'"([^"]*)"', lambda match: f'"{match.group(1).strip()}"', fixed)
+        fixed = re.sub(r"\s+([,.;:])", r"\1", fixed)
+        fixed = re.sub(r"([,.;:])([^\s])", r"\1 \2", fixed)
+        fixed = re.sub(r"\s{2,}", " ", fixed)
+        return fixed.strip()
 
     def _apply_final_control(
         self,
@@ -940,11 +1475,7 @@ class ResponseCurator:
         return any(marker in normalized for marker in domain_markers.get(domain, ()))
 
     def _normalize(self, text: Optional[str]) -> str:
-        normalized = " ".join((text or "").strip().lower().split())
-        normalized = unicodedata.normalize("NFKD", normalized)
-        normalized = "".join(char for char in normalized if not unicodedata.combining(char))
-        normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
-        return " ".join(normalized.split())
+        return normalize_input(text)
 
     def _current_user_message(self, conversation_control: Dict[str, Any], chat_history: List[Dict[str, Any]]) -> str:
         source_message = str(
@@ -1802,6 +2333,10 @@ class ResponseCurator:
         current_start = " ".join(self._normalize(curated_text).split()[:4])
         previous_start = " ".join(self._normalize(previous_text).split()[:4])
         return bool(current_start and current_start == previous_start)
+
+
+def humanize_without_overwriting(plan: Optional[Dict[str, Any]]) -> str:
+    return ResponseCurator().humanize_without_overwriting(plan)
 
 
 def curate_llm_response(

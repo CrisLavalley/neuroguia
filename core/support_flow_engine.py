@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import re
@@ -15,6 +16,15 @@ from core.support_playbooks import (
     get_playbook_spec,
     infer_basic_signal,
 )
+
+
+def normalize_input(text: str) -> str:
+    """Normaliza solo para matching interno; la respuesta visible conserva UTF-8."""
+
+    normalized = unicodedata.normalize("NFKD", str(text or "").strip().lower())
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    return " ".join(normalized.split())
 
 
 GuidanceMode = Literal["advance", "hold", "close", "switch", "direct"]
@@ -350,8 +360,8 @@ class SupportFlowEngine:
         "sigue igual",
     ]
     SLEEP_PRIORITY_MARKERS = [
-        "hay problemas de sueno",
-        "sueno",
+        "hay problemas de sueño",
+        "sueño",
         "dormir",
         "duermo",
         "no duermo",
@@ -423,7 +433,7 @@ class SupportFlowEngine:
             "no puedo empezar ahora",
         ],
         "sueno": [
-            "esto es de sueno",
+            "esto es de sueño",
             "ahora no puedo dormir",
             "ahora el problema es dormir",
             "esto es insomnio",
@@ -480,7 +490,7 @@ class SupportFlowEngine:
             "no duermo",
             "no puedo dormir",
             "dormir",
-            "sueno",
+            "sueño",
             "desvelo",
             "insomnio",
             "pantalla antes de dormir",
@@ -868,16 +878,16 @@ class SupportFlowEngine:
         }
 
         fallback_payload = {
-            "use_llm": bool(result.response_plan.humanization_required),
-            "fallback_reason": "support_flow_humanization",
+            "use_llm": False,
+            "fallback_reason": "support_flow_locked_to_local_humanizer",
             "prompt_mode": "support_flow_humanization",
             "should_learn_if_good": False,
             "prefer_support_flow_local_humanizer": True,
         }
 
         llm_policy = {
-            "should_use_llm": bool(result.response_plan.humanization_required),
-            "reason": "support_flow_humanization",
+            "should_use_llm": False,
+            "reason": "support_flow_locked_to_local_humanizer",
             "prompt_mode": "support_flow_humanization",
             "domain": result.conversation_domain,
             "phase": phase,
@@ -2145,7 +2155,7 @@ class SupportFlowEngine:
                 tone="claro_suave",
                 validation="",
                 main_response=f"{prefix}Ahora no sumes medidas: sosten luz baja o pantalla fuera 5 a 10 minutos.",
-                optional_followup="Despues vemos si pesa mas la mente, el cuerpo o el entorno.",
+                optional_followup="Después vemos si pesa más la mente, el cuerpo o el entorno.",
                 tags=["next_step", "hold_sleep_step"],
             )
         if subroute_id == "sleep_mind_racing":
@@ -2157,7 +2167,7 @@ class SupportFlowEngine:
                 validation="",
                 main_response=f"{prefix}Si la mente sigue corriendo, saca tres pendientes a una hoja y cierra la hoja.",
                 next_step="Escribe tres pendientes y cierra la hoja",
-                literal_phrase="Eso lo veo manana. Ahorita no tengo que resolverlo.",
+                literal_phrase="Eso lo veo mañana. Ahorita no tengo que resolverlo.",
                 tags=["next_step", "mind_racing"],
             )
         if subroute_id == "sleep_body_activated":
@@ -2167,8 +2177,8 @@ class SupportFlowEngine:
                 goal="next_distinct_step",
                 tone="claro_suave",
                 validation="",
-                main_response=f"{prefix}Si el cuerpo esta activado, baja cuerpo sin forzar sueno: afloja mandibula, hombros y tres exhalaciones largas.",
-                next_step="Afloja mandibula, hombros y deja tres exhalaciones largas",
+                main_response=f"{prefix}Si el cuerpo está activado, baja cuerpo sin forzar sueño: afloja mandíbula, hombros y tres exhalaciones largas.",
+                next_step="Afloja mandíbula, hombros y deja tres exhalaciones largas",
                 micro_practice="body_settle_exhale",
                 tags=["next_step", "body_activated"],
             )
@@ -2189,7 +2199,7 @@ class SupportFlowEngine:
             goal="close_temporarily",
             tone="claro_suave",
             validation="",
-            main_response=f"{prefix}Ya no agregues otra medida. Sosten lo mas bajo y simple por ahora.",
+            main_response=f"{prefix}Ya no agregues otra medida. Sostén lo más bajo y simple por ahora.",
             close_softly=True,
             tags=["followup_exit", "close"],
         )
@@ -2315,7 +2325,7 @@ class SupportFlowEngine:
                 tone="claro_directo",
                 validation="",
                 main_response=(
-                    "Hazlo literal: pies en el piso, suelta el aire mas largo una vez y mira tres cosas alrededor."
+                    "Hazlo literal: pies en el piso, suelta el aire más largo una vez y mira tres cosas alrededor."
                 ),
                 state_subroute_id=active_subroute or subroute_id,
                 tags=["clarify_current_action", "grounding"],
@@ -2330,7 +2340,7 @@ class SupportFlowEngine:
                 tone="claro_directo",
                 validation="",
                 main_response=(
-                    "Haz una sola accion real de sueño: baja la luz o la pantalla y deja 5 a 10 minutos sin exigencia."
+                    "Haz una sola acción real de sueño: baja la luz o la pantalla y deja 5 a 10 minutos sin exigencia."
                 ),
                 state_subroute_id=active_subroute or subroute_id,
                 tags=["clarify_current_action", "sleep"],
@@ -2556,7 +2566,7 @@ class SupportFlowEngine:
                 tone="claro_directo",
                 validation="",
                 main_response="Ahora no sumes mas de una medida: sostén la baja de luz o pantalla 5 a 10 minutos.",
-                optional_followup="Si sigue igual despues, cambiamos de via, pero seguimos dentro del tema de sueno.",
+                optional_followup="Si sigue igual después, cambiamos de vía, pero seguimos dentro del tema de sueño.",
                 state_subroute_id=active_subroute or "sleep_followup",
                 tags=["hold", "post_action_followup"],
             )
@@ -2865,7 +2875,7 @@ class SupportFlowEngine:
         if route_id == "bloqueo_ejecutivo" and not instruction:
             return "Haz una sola cosa: abre la materia o tarea mas urgente de hoy."
         if route_id == "ansiedad" and not instruction:
-            return "Haz una sola cosa: pies en el piso y una exhalacion larga."
+            return "Haz una sola cosa: pies en el piso y una exhalación larga."
         if route_id == "apoyo_infancia_neurodivergente" and not instruction:
             return "Haz una sola cosa por tu hija/o: o menos palabras, o menos estimulos, o una frase breve."
         if instruction:
@@ -2913,12 +2923,10 @@ class SupportFlowEngine:
         return "Ahora toca una sola decision: o sostener esto por ahora, o cambiar a una sola via distinta."
 
     def _contains_any(self, normalized_text: str, phrases: List[str]) -> bool:
-        return any(phrase in normalized_text for phrase in phrases)
+        return any(normalize_input(phrase) in normalized_text for phrase in phrases)
 
     def _normalize(self, text: str) -> str:
-        normalized = unicodedata.normalize("NFKD", str(text or "").strip().lower())
-        normalized = "".join(char for char in normalized if not unicodedata.combining(char))
-        return " ".join(normalized.split())
+        return normalize_input(text)
 
 
 if __name__ == "__main__":

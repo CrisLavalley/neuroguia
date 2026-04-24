@@ -1,14 +1,26 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import json
 import os
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
+
+
+def normalize_input(text: Optional[str]) -> str:
+    """Normaliza solo para matching interno; la salida visible conserva acentos."""
+
+    normalized = " ".join((text or "").strip().lower().split())
+    normalized = unicodedata.normalize("NFKD", normalized)
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    return " ".join(normalized.split())
 
 
 class LLMGateway:
@@ -21,6 +33,7 @@ class LLMGateway:
         "controlled_reflective_feedback",
         "controlled_adaptive_support",
         "controlled_calm_support",
+        "support_flow_humanization",
     }
 
     DEFAULT_OPENAI_MODEL = "gpt-5-mini"
@@ -71,6 +84,17 @@ class LLMGateway:
         conversational_intent = case_context.get("conversational_intent", {}) or {}
         user_context_memory = case_context.get("user_context_memory", {}) or {}
         expert_adaptation_plan = case_context.get("expert_adaptation_plan", {}) or {}
+        support_flow_response_plan = (
+            case_context.get("support_flow_response_plan")
+            or decision_payload.get("support_flow_response_plan")
+            or {}
+        )
+        if support_flow_response_plan:
+            return {
+                "allowed": False,
+                "reason": "support_flow_locked_to_response_curator",
+                "request_payload": None,
+            }
         response_goal = decision_payload.get("response_goal", {}) or {}
         constraints = fallback_payload.get("constraints", {}) or {}
 
@@ -125,6 +149,7 @@ class LLMGateway:
             "case_summary": self._build_case_summary(message, state_analysis, category_analysis, intent_analysis, case_context),
             "guidance_summary": self._build_guidance_summary(decision_payload, routine_payload, memory_payload, response_memory_payload, support_plan),
             "response_goal": response_goal,
+            "support_flow_response_plan": support_flow_response_plan,
             "conversational_intent": conversational_intent,
             "recent_turns": self._build_recent_turns(chat_history),
             "confidence_summary": {
@@ -158,6 +183,8 @@ class LLMGateway:
         request_payload = request_payload or {}
         if not request_payload:
             return self._build_stub_fallback_result(request_payload=request_payload, reason="empty_request_payload")
+        if request_payload.get("support_flow_response_plan"):
+            return self._build_locked_support_flow_result(request_payload)
         if not self._is_openai_llm_enabled():
             return self._build_stub_fallback_result(request_payload=request_payload, reason="llm_disabled_by_env", llm_enabled=False)
 
@@ -215,6 +242,7 @@ class LLMGateway:
         conversation_control = request_payload.get("conversation_control", {}) or {}
         conversational_intent = request_payload.get("conversational_intent", {}) or {}
         response_goal = request_payload.get("response_goal", {}) or {}
+        support_flow_response_plan = request_payload.get("support_flow_response_plan", {}) or {}
         stage_summary = request_payload.get("stage_summary", {}) or {}
         constraints = request_payload.get("constraints", {}) or {}
         recent_turns = request_payload.get("recent_turns", []) or []
@@ -222,11 +250,13 @@ class LLMGateway:
         rules = [
             "Eres NeuroGuIA y solo redactas la respuesta final para la persona usuaria.",
             "La clasificacion, la seguridad, el dominio y la fase ya fueron decididos por el sistema local.",
+            "Si recibes un support_flow_response_plan, tu trabajo es redactarlo mejor, no cambiarlo.",
             "Responde en espanol claro, calido, cercano, suave, paciente y contenedor; evita sonar tecnico, clinico o rigido.",
             "Haz sentir presencia real: puedes sonar casi maternal si el momento lo pide, sin infantilizar.",
             "No menciones taxonomias internas, nombres tecnicos ni etiquetas del sistema.",
             "No diagnostiques ni sustituyas atencion profesional.",
             "No cambies de dominio por tu cuenta.",
+            "No cambies el problema central ni metas estrategias nuevas si no vienen ya implicitas en el plan base.",
             "Orden sugerido: responde primero al mensaje real del usuario y usa el response_goal solo como direccion de fondo.",
             "Si conversational_intent contradice, suaviza o desvanece el dominio o el response_goal, ignoralo.",
             "Respeta el objetivo del turno, no una forma exacta prefabricada.",
@@ -275,6 +305,19 @@ class LLMGateway:
             rules.append("No es obligatorio cerrar con tarea si la respuesta funciona mejor bajando exigencia o pausando.")
         if response_goal.get("response_shape") == "literal_phrase":
             rules.append("Entrega primero una frase literal usable, no solo una estrategia general.")
+        if support_flow_response_plan:
+            rules.append("Conserva la validacion, la accion central, la frase literal y el tipo de cierre del support_flow_response_plan.")
+            rules.append("Puedes corregir ortografia, tildes, naturalidad y calidez, pero no debes mover la ruta conductual.")
+            rules.append("No agregues grounding, validacion emocional generica ni tecnicas de ansiedad si no aparecen en el plan.")
+            rules.append("Bloquea estas frases salvo subruta ansiedad_grounding: 'Tiene sentido que esto te este pesando', 'Vamos primero a bajar la activacion', 'pies en el piso', 'exhalacion mas larga'.")
+            route_id = normalize_input(str(support_flow_response_plan.get("route_id") or ""))
+            subroute_id = normalize_input(str(support_flow_response_plan.get("subroute_id") or ""))
+            if route_id == "crisis":
+                rules.append("Ruta crisis: usa solo acciones externas, control del entorno y frases breves; no uses introspeccion, grounding corporal ni respiracion.")
+            if route_id == "sueno":
+                rules.append("Ruta sueño: usa solo estimulos, entorno y mente versus cuerpo; no uses grounding emocional.")
+            if subroute_id:
+                rules.append(f"Subruta bloqueada por el flow_engine: {support_flow_response_plan.get('subroute_id')}.")
         if conversation_control.get("turn_family") == "post_action_followup":
             rules.append("Esto es seguimiento post-accion: no repitas el protocolo anterior; verifica efecto, decide si parar o da un paso distinto.")
         if (conversation_control.get("progression_signals", {}) or {}).get("repeated_post_action_followup"):
@@ -311,6 +354,7 @@ class LLMGateway:
         profile_summary = request_payload.get("profile_summary", {}) or {}
         guidance_summary = request_payload.get("guidance_summary", {}) or {}
         response_goal = request_payload.get("response_goal", {}) or {}
+        support_flow_response_plan = request_payload.get("support_flow_response_plan", {}) or {}
         conversational_intent = request_payload.get("conversational_intent", {}) or {}
         user_context_memory = request_payload.get("user_context_memory", {}) or {}
         constraints = request_payload.get("constraints", {}) or {}
@@ -347,6 +391,7 @@ class LLMGateway:
             "profile_role": profile_summary.get("role"),
             "profile_conditions": profile_summary.get("conditions", []),
             "response_goal": response_goal,
+            "support_flow_response_plan": support_flow_response_plan,
             "conversational_intent": conversational_intent,
             "memory_snapshot": user_context_memory.get("summary_snapshot", {}),
             "helpful_memory": {
@@ -362,6 +407,13 @@ class LLMGateway:
                 "should_close_with_followup": constraints.get("should_close_with_followup"),
             },
         }
+        support_flow_base = ""
+        if support_flow_response_plan:
+            support_flow_base = (
+                "\n\nPLAN CONDUCTUAL YA DECIDIDO:\n"
+                f"{json.dumps(support_flow_response_plan, ensure_ascii=False, indent=2)}"
+            )
+
         return (
             "TRANSCRIPCION RECIENTE:\n"
             f"{transcript}\n\n"
@@ -369,6 +421,7 @@ class LLMGateway:
             f"{request_payload.get('message') or ''}\n\n"
             "CONTEXTO ESTRUCTURADO DEL SISTEMA:\n"
             f"{json.dumps(compact_context, ensure_ascii=False, indent=2)}"
+            f"{support_flow_base}"
         )
 
     def _build_recent_turns(self, chat_history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -442,6 +495,26 @@ class LLMGateway:
         stub_result["llm_enabled"] = llm_enabled
         stub_result["generation_metadata"] = self._build_generation_metadata(request_payload, "stub_local", "local_stub", True, reason, llm_enabled)
         return stub_result
+
+    def _build_locked_support_flow_result(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "response_text": "",
+            "response_structure": self._extract_structure(""),
+            "llm_confidence_hint": 0.0,
+            "provider": "support_flow_locked",
+            "model": "none",
+            "used_stub_fallback": True,
+            "fallback_reason": "support_flow_locked_to_response_curator",
+            "llm_enabled": False,
+            "generation_metadata": self._build_generation_metadata(
+                request_payload,
+                "support_flow_locked",
+                "none",
+                True,
+                "support_flow_locked_to_response_curator",
+                False,
+            ),
+        }
 
     def _build_generation_metadata(self, request_payload: Dict[str, Any], provider: str, model: str, used_stub_fallback: bool, fallback_reason: Optional[str], llm_enabled: bool) -> Dict[str, Any]:
         case_summary = request_payload.get("case_summary", {}) or {}
@@ -549,6 +622,14 @@ class LLMGateway:
             rules.extend(["Explica de forma clara y breve.", "No uses jerga innecesaria."])
         if prompt_mode == "controlled_reflective_feedback":
             rules.append("Ayuda a reflexionar sin sonar evaluativo.")
+        if prompt_mode == "support_flow_humanization":
+            rules.extend(
+                [
+                    "Redacta desde el plan conductual ya decidido sin cambiar la ruta.",
+                    "Tu trabajo principal aqui es humanizar, corregir ortografia, mejorar fluidez y sonar mas cercano.",
+                    "Si el plan trae una frase literal, conservala o solo suavizala sin cambiar su sentido.",
+                ]
+            )
         if primary_state in {"meltdown", "shutdown"}:
             rules.append("Reduce aun mas la exigencia verbal.")
         if category == "ansiedad_cognitiva":
