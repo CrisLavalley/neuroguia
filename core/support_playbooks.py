@@ -784,8 +784,8 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
             goal="clarify_anxiety_step",
             tone="claro_calido",
             validation="Si, te lo digo directo.",
-            main_response="Haz solo esto: pies en el piso y suelta el aire más largo una vez.",
-            next_step="Pies en el piso y una exhalación larga",
+            main_response="Si la ansiedad está encima, baja primero una señal del cuerpo: pies firmes y una salida de aire larga.",
+            next_step="Pies firmes y una salida de aire larga",
             micro_practice="grounding_exhale",
             tags=["ansiedad", "grounding"],
         )
@@ -796,11 +796,11 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
             subroute_id="anxiety_initial_grounding",
             goal="reduce_anxiety_now",
             tone="calido_contenedor",
-            validation="Si, esto ya se siente demasiado.",
-            main_response="No vamos a resolver todo ahora. Primero vuelve un poco al cuerpo: pies en el piso y una exhalación larga.",
-            next_step="Pies en el piso y una exhalación larga",
+            validation="Si la ansiedad ya se desbordó, no la resolvemos pensando más fuerte.",
+            main_response="Primero baja una señal del cuerpo: pies firmes y una salida de aire larga.",
+            next_step="Pies firmes y una salida de aire larga",
             micro_practice="grounding_exhale",
-            optional_followup="Cuando baje un poco, hacemos una sola accion visible.",
+            optional_followup="Cuando baje un poco, sacamos una preocupación concreta de la cabeza.",
             tags=["ansiedad", "grounding"],
         )
 
@@ -811,7 +811,7 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
             goal="one_real_next_step_for_anxiety",
             tone="calido_directo",
             validation="",
-            main_response="Haz una sola accion visible: abre una nota y escribe una linea con lo que te preocupa mas ahorita.",
+            main_response="Abre una nota y escribe una linea con lo que te preocupa mas ahorita.",
             next_step="Abre una nota y escribe una linea con la preocupacion principal",
             optional_followup="No hace falta resolverlo todavia. Solo sacarlo un poco de la cabeza.",
             tags=["ansiedad", "accion_visible"],
@@ -837,7 +837,7 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
             goal="repair_after_frustration",
             tone="calido_claro",
             validation="Gracias por decirme que asi no te sirve.",
-            main_response="No voy a insistir con lo mismo. Cambio de via contigo ahora.",
+            main_response="No voy a insistir con lo mismo. Tomo otra entrada para la ansiedad ahora.",
             optional_followup="Podemos ir por cuerpo treinta segundos o por una sola linea en una nota. Si no quieres elegir, elijo yo.",
             tags=["ansiedad", "reparacion"],
         )
@@ -847,13 +847,13 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
             return _plan(
                 route_id="ansiedad",
                 subroute_id="anxiety_hold_after_partial_relief",
-                goal="hold_or_close_after_partial_effect",
-                tone="calido_claro",
-                validation="Bien, eso ya movio algo.",
-                main_response="Quedate con lo que ya bajo un poco la carga. No metas otra tecnica ahorita.",
-                close_softly=True,
-                state_subroute_id="anxiety_hold_after_partial_relief",
-                tags=["ansiedad", "sostener"],
+            goal="hold_or_close_after_partial_effect",
+            tone="calido_claro",
+            validation="Bien, eso ya movio algo.",
+            main_response="No metas otra tecnica ahora. Deja quieto lo demas y conserva solo lo que ya aflojo.",
+            close_softly=True,
+            state_subroute_id="anxiety_hold_after_partial_relief",
+            tags=["ansiedad", "sostener"],
             )
         if signal.outcome in ("no_change", "worse"):
             return _plan(
@@ -873,9 +873,9 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
         subroute_id="anxiety_initial_grounding",
         goal="initial_anxiety_support",
         tone="calido_contenedor",
-        validation="Sí, esto ya está pesando mucho.",
-        main_response="Baja un poco la activación con una sola acción: pies en el piso y una exhalación un poco más larga.",
-        next_step="Pies en el piso y una exhalación larga",
+        validation="La ansiedad se siente como demasiados frentes abiertos a la vez.",
+        main_response="No abras otro frente. Baja primero una señal del cuerpo: pies firmes y una salida de aire larga.",
+        next_step="Pies firmes y una salida de aire larga",
         micro_practice="grounding_exhale",
         optional_followup="Después vemos si hace falta una acción visible o una decisión corta.",
         tags=["ansiedad", "inicio"],
@@ -1513,7 +1513,7 @@ def playbook_clarification(signal: UserSignal) -> ResponsePlan:
             goal="clarify_in_one_step",
             tone="claro_calido",
             validation="Si, te doy tipos concretos.",
-            main_response="Piensalo asi: puede ser una frase, un cambio de entorno, una accion visible o una pausa corta. Elige solo una.",
+            main_response="Piensalo asi: puede ser una frase, un cambio de entorno, una marca fuera de la cabeza o una pausa corta. Elige solo una.",
             tags=["clarification", "types"],
         )
     if track == "where_do_i_start":
@@ -1531,8 +1531,8 @@ def playbook_clarification(signal: UserSignal) -> ResponsePlan:
         subroute_id="i_dont_understand",
         goal="clarify_in_one_step",
         tone="claro_calido",
-        validation="Sí, lo bajo más.",
-        main_response="Dime el punto exacto que quedó confuso y lo convierto en un paso concreto.",
+        validation="Sí, lo bajo más sin cambiarte de tema.",
+        main_response="Dime si esto va de sueño, tarea, crisis, ansiedad o apoyo para tu hija o hijo, y lo vuelvo un paso de esa ruta.",
         tags=["clarification"],
     )
 
@@ -1556,8 +1556,8 @@ def playbook_strategy_rejection(signal: UserSignal) -> ResponsePlan:
         goal="change_strategy_without_pressure",
         tone="calido_claro",
         validation="Tienes razón en marcarlo.",
-        main_response="Cambio de vía sin reciclar lo anterior: te doy una salida más directa y ligada al tema que traías.",
-        optional_followup="Si no quieres elegir, elijo yo la opcion mas simple para este momento.",
+        main_response="No voy a reciclar lo anterior. Para no mezclar dominios, necesito tomar una sola ruta: sueño, tarea, crisis, ansiedad o apoyo para tu hija o hijo.",
+        optional_followup="Si no quieres elegir, dime una palabra del tema y lo cierro yo.",
         tags=["strategy_rejection", "change_path"],
     )
 
@@ -1569,8 +1569,8 @@ def playbook_next_step(signal: UserSignal) -> ResponsePlan:
         goal="offer_next_step_without_reset",
         tone="calido_directo",
         validation="Bien, seguimos sin abrir de mas.",
-        main_response="El siguiente paso es dejar una sola accion pequena y visible.",
-        optional_followup="Si quieres, te la dejo aun mas concreta.",
+        main_response="Para no darte una salida genérica, dime si esto va de sueño, tarea, crisis, ansiedad, cuidador o apoyo para tu hija o hijo.",
+        optional_followup="Con esa palabra te doy solo el primer paso.",
         tags=["next_step"],
     )
 

@@ -652,6 +652,13 @@ class SupportFlowEngine:
             "child_reduce_stimuli",
             "child_anticipation_routines",
         ],
+        "sobrecarga_cuidador": [
+            "caregiver_validation",
+            "caregiver_reduce_load",
+            "caregiver_ask_for_help",
+            "caregiver_single_priority",
+            "caregiver_self_care_without_guilt",
+        ],
     }
 
     def resolve_turn(
@@ -1206,8 +1213,6 @@ class SupportFlowEngine:
 
         if turn_family == "meta_question":
             return "meta_question"
-        if self._has_child_support_signal(normalized):
-            return "apoyo_infancia_neurodivergente"
         if self._should_keep_crisis_domain(
             previous_route=effective_previous_route,
             normalized=normalized,
@@ -1215,12 +1220,16 @@ class SupportFlowEngine:
             conversation_control=conversation_control,
         ):
             return "crisis"
+        if self._is_external_crisis_request(normalized):
+            return "crisis"
         explicit_shift_route = self._resolve_explicit_domain_shift_route(
             normalized=normalized,
             conversation_control=conversation_control,
         )
         if explicit_shift_route:
             return explicit_shift_route
+        if self._has_child_support_signal(normalized):
+            return "apoyo_infancia_neurodivergente"
 
         if self._should_keep_active_domain_lock(
             locked_route=effective_previous_route,
@@ -1249,6 +1258,8 @@ class SupportFlowEngine:
         if effective_previous_route and turn_family in self.FOLLOWUP_FAMILIES:
             return effective_previous_route
 
+        if self._is_external_crisis_request(normalized):
+            return "crisis"
         if self._has_child_support_signal(normalized):
             return "apoyo_infancia_neurodivergente"
         if self._contains_any(normalized, self.ROUTE_TEXT_MARKERS.get("crisis", [])):
@@ -1942,11 +1953,11 @@ class SupportFlowEngine:
             tone="firme_calmo",
             validation="Estoy contigo.",
             main_response=(
-                "Para una crisis de otra persona, no hagas autorregulacion ahora: baja tu tono, "
-                "usa frases muy breves, no discutas, no expliques demasiado y baja estimulos alrededor."
+                "Si tu hija o hijo está en crisis, lo primero es bajar carga alrededor: baja tu tono, "
+                "usa frases muy breves, no discutas, no expliques demasiado y baja estímulos alrededor."
             ),
             next_step="Baja tono, frases breves, no discutir y menos estimulos",
-            optional_followup="Si hay riesgo de golpearse o hacer dano, prioriza distancia segura y ayuda presencial.",
+            optional_followup="Si hay riesgo de golpearse o hacer daño, prioriza distancia segura y ayuda presencial.",
             state_subroute_id="crisis_first_step",
             tags=["external_crisis", "co_regulation", "reduce_stimuli"],
         )
@@ -2032,7 +2043,12 @@ class SupportFlowEngine:
             }.get(active_subroute or "")
             if executive_alias_next:
                 return executive_alias_next
-        if route_id == "apoyo_infancia_neurodivergente" and active_subroute == "child_overthinking_support":
+        if (
+            route_id == "apoyo_infancia_neurodivergente"
+            and active_subroute == "child_overthinking_support"
+            and not force_distinct
+            and self._contains_any(normalized, ["sobrepiensa", "sobrepensar", "preocupacion", "preocupaciones"])
+        ):
             return "child_overthinking_support"
 
         if active_subroute in sequence:
@@ -2045,6 +2061,8 @@ class SupportFlowEngine:
             candidate != active_subroute and candidate not in recent_subroutes
             for candidate in ordered
         )
+        if force_distinct and not has_fresh_candidate:
+            return "strategy_switch"
         for candidate in ordered:
             if candidate == active_subroute:
                 continue
@@ -2091,6 +2109,8 @@ class SupportFlowEngine:
             return self._build_sleep_distinct_plan(subroute_id=subroute_id, prefix=prefix)
         if route_id == "apoyo_infancia_neurodivergente":
             return self._build_child_distinct_plan(subroute_id=subroute_id, prefix=prefix)
+        if route_id == "sobrecarga_cuidador":
+            return self._build_caregiver_distinct_plan(subroute_id=subroute_id, prefix=prefix)
         return self._make_engine_plan(
             route_id=route_id,
             subroute_id="strategy_switch",
@@ -2150,6 +2170,30 @@ class SupportFlowEngine:
         )
 
     def _build_anxiety_distinct_plan(self, subroute_id: str, prefix: str) -> ResponsePlan:
+        if subroute_id == "strategy_switch":
+            return self._make_engine_plan(
+                route_id="ansiedad",
+                subroute_id="anxiety_change_modality",
+                goal="switch_strategy",
+                tone="claro_directo",
+                validation="",
+                main_response=f"{prefix}No repitamos la misma técnica. Pasa a una sola vía distinta: escribir la preocupación principal o cerrar por ahora.",
+                optional_followup="Elige una; no abras las dos.",
+                state_subroute_id="anxiety_change_modality",
+                tags=["switch", "anxiety_progression"],
+            )
+        if subroute_id == "anxiety_initial_grounding":
+            return self._make_engine_plan(
+                route_id="ansiedad",
+                subroute_id=subroute_id,
+                goal="next_distinct_step",
+                tone="claro_directo",
+                validation="",
+                main_response=f"{prefix}Vuelve a una señal física mínima: pies firmes y una salida de aire larga.",
+                next_step="Pies firmes y una salida de aire larga",
+                micro_practice="grounding_exhale",
+                tags=["next_step", "grounding"],
+            )
         if subroute_id == "anxiety_visible_action":
             return self._make_engine_plan(
                 route_id="ansiedad",
@@ -2157,7 +2201,7 @@ class SupportFlowEngine:
                 goal="next_distinct_step",
                 tone="claro_directo",
                 validation="",
-                main_response=f"{prefix}Ahora una accion visible: abre una nota y escribe una sola linea con la preocupacion principal.",
+                main_response=f"{prefix}Saca la ansiedad de la cabeza a una marca concreta: abre una nota y escribe una sola linea con la preocupacion principal.",
                 next_step="Escribe una sola linea con la preocupacion principal",
                 optional_followup="No la resuelvas todavia; solo sacala de la cabeza.",
                 tags=["next_step", "visible_action"],
@@ -2179,7 +2223,7 @@ class SupportFlowEngine:
             goal="hold_line",
             tone="claro_directo",
             validation="",
-            main_response=f"{prefix}Quedate con una sola cosa que bajo la carga y no metas otra tecnica ahorita.",
+            main_response=f"{prefix}Si bajó aunque sea un poco, no abras otra técnica. Deja quieto lo demás por este momento.",
             close_softly=True,
             tags=["hold", "enough_for_now"],
         )
@@ -2234,6 +2278,18 @@ class SupportFlowEngine:
         )
 
     def _build_sleep_distinct_plan(self, subroute_id: str, prefix: str) -> ResponsePlan:
+        if subroute_id == "strategy_switch":
+            return self._make_engine_plan(
+                route_id="sueno",
+                subroute_id="sleep_followup",
+                goal="switch_strategy",
+                tone="claro_suave",
+                validation="",
+                main_response=f"{prefix}No sigas peleando con dormir. Cambia solo una condición de sueño: pantalla fuera, luz baja o ruido más bajo.",
+                optional_followup="Después sostén eso unos minutos sin exigirte dormir ya.",
+                state_subroute_id="sleep_followup",
+                tags=["switch", "sleep_progression"],
+            )
         if subroute_id == "sleep_followup":
             return self._make_engine_plan(
                 route_id="sueno",
@@ -2242,7 +2298,7 @@ class SupportFlowEngine:
                 tone="claro_suave",
                 validation="",
                 main_response=f"{prefix}Ahora sostén una rutina de bajada: baja pantalla o luz por 10 minutos.",
-                optional_followup="Si el problema es mente acelerada, escribe una sola preocupación en una nota y ciérrala.",
+                optional_followup="No agregues otra medida mientras observas si el cuerpo afloja.",
                 tags=["next_step", "hold_sleep_step"],
             )
         if subroute_id == "sleep_mind_racing":
@@ -2292,6 +2348,18 @@ class SupportFlowEngine:
         )
 
     def _build_child_distinct_plan(self, subroute_id: str, prefix: str) -> ResponsePlan:
+        if subroute_id == "strategy_switch":
+            return self._make_engine_plan(
+                route_id="apoyo_infancia_neurodivergente",
+                subroute_id="child_co_regulation",
+                goal="switch_strategy",
+                tone="claro_directo",
+                validation="",
+                main_response=f"{prefix}No insistamos con la misma ayuda. Cambia solo una cosa para tu hija o hijo: menos palabras, menos estímulos o una frase corta.",
+                optional_followup="Elige una sola para no sumarle más carga.",
+                state_subroute_id="child_co_regulation",
+                tags=["switch", "child_support"],
+            )
         if subroute_id == "child_overthinking_support":
             return self._make_engine_plan(
                 route_id="apoyo_infancia_neurodivergente",
@@ -2350,6 +2418,63 @@ class SupportFlowEngine:
             main_response=f"{prefix}Deja una anticipacion simple: ahora una parte, luego descanso o cierre.",
             literal_phrase="Ahora una parte; luego descansamos.",
             tags=["next_step", "anticipation"],
+        )
+
+    def _build_caregiver_distinct_plan(self, subroute_id: str, prefix: str) -> ResponsePlan:
+        if subroute_id == "caregiver_ask_for_help":
+            return self._make_engine_plan(
+                route_id="sobrecarga_cuidador",
+                subroute_id=subroute_id,
+                goal="next_distinct_step",
+                tone="calido_practico",
+                validation="",
+                main_response=f"{prefix}Pide una ayuda cerrada, no ayuda en general: una hora, una tarea o una decisión concreta.",
+                literal_phrase="Hoy necesito que tomes esta parte concreta para que yo pueda bajar un poco.",
+                tags=["next_step", "ask_for_help"],
+            )
+        if subroute_id == "caregiver_single_priority":
+            return self._make_engine_plan(
+                route_id="sobrecarga_cuidador",
+                subroute_id=subroute_id,
+                goal="next_distinct_step",
+                tone="calido_practico",
+                validation="",
+                main_response=f"{prefix}Cierra una sola prioridad para hoy: seguridad, descanso o lo que vence hoy.",
+                optional_followup="Lo demás no se resuelve en este minuto.",
+                tags=["next_step", "single_priority"],
+            )
+        if subroute_id == "caregiver_self_care_without_guilt":
+            return self._make_engine_plan(
+                route_id="sobrecarga_cuidador",
+                subroute_id=subroute_id,
+                goal="hold_line",
+                tone="calido_practico",
+                validation="",
+                main_response=f"{prefix}Deja una pausa mínima sin culpa: agua, baño, sentarte cinco minutos o respirar fuera.",
+                close_softly=True,
+                tags=["hold", "self_care"],
+            )
+        if subroute_id == "strategy_switch":
+            return self._make_engine_plan(
+                route_id="sobrecarga_cuidador",
+                subroute_id="caregiver_single_priority",
+                goal="switch_strategy",
+                tone="calido_practico",
+                validation="",
+                main_response=f"{prefix}No intentemos sostener todo. Elige solo entre seguridad, descanso o una tarea urgente.",
+                state_subroute_id="caregiver_single_priority",
+                tags=["switch", "caregiver"],
+            )
+        return self._make_engine_plan(
+            route_id="sobrecarga_cuidador",
+            subroute_id="caregiver_reduce_load",
+            goal="next_distinct_step",
+            tone="calido_practico",
+            validation="",
+            main_response=f"{prefix}Suelta una carga que pueda esperar: una decisión, una tarea o una exigencia que no sea de seguridad.",
+            optional_followup="No estás fallando por bajar una parte.",
+            state_subroute_id="caregiver_reduce_load",
+            tags=["next_step", "reduce_load"],
         )
 
     def _build_current_action_clarification_plan(
@@ -2431,6 +2556,17 @@ class SupportFlowEngine:
 
         if last_action_type == "grounding_step":
             subroute_id = "anxiety_initial_grounding" if route_id == "ansiedad" else "what_type"
+            if route_id != "ansiedad":
+                return self._make_engine_plan(
+                    route_id=route_id,
+                    subroute_id=subroute_id,
+                    goal="clarify_current_action",
+                    tone="claro_directo",
+                    validation="",
+                    main_response=self._starting_point_response(route_id),
+                    state_subroute_id=active_subroute or subroute_id,
+                    tags=["clarify_current_action", "route_reset"],
+                )
             return self._make_engine_plan(
                 route_id=route_id,
                 subroute_id=subroute_id,
@@ -2554,15 +2690,15 @@ class SupportFlowEngine:
                 )
             if "no puedo empezar" in normalized or active_subroute == "executive_no_puedo_empezar":
                 return self._make_engine_plan(
-                    route_id=route_id,
-                    subroute_id="executive_no_puedo_empezar",
-                    goal="lower_demand_for_block",
-                    tone="claro_directo",
-                    validation="",
-                    main_response="Haz solo esto: abre el archivo o cuaderno y escribe solo el titulo.",
-                    optional_followup="Con eso ya no esta en cero.",
-                    state_subroute_id="executive_no_puedo_empezar",
-                    tags=["lower_demand", "direct_answer"],
+                route_id=route_id,
+                subroute_id="executive_no_puedo_empezar",
+                goal="lower_demand_for_block",
+                tone="claro_directo",
+                validation="No tienes que poder con toda la tarea para empezar.",
+                main_response="Abre el archivo o cuaderno y escribe solo el titulo.",
+                optional_followup="Con eso ya no esta en cero.",
+                state_subroute_id="executive_no_puedo_empezar",
+                tags=["lower_demand", "direct_answer"],
                 )
             if "decide tu" in normalized or "elige tu" in normalized or active_subroute == "executive_decide_for_user":
                 return self._make_engine_plan(
@@ -2595,15 +2731,23 @@ class SupportFlowEngine:
             sleep_subroute = (
                 "sleep_insomnia"
                 if self._contains_any(normalized, ["no puedo dormir", "insomnio", "desvelo"])
-                else active_subroute or "sleep_initial"
+                else self._sleep_branch_from_text(normalized)
+                or active_subroute
+                or "sleep_initial"
             )
+            sleep_text = {
+                "sleep_mind_racing": "Saca a una hoja tres pendientes o preocupaciones y luego cierra la hoja.",
+                "sleep_body_activated": "Afloja mandíbula, hombros y deja tres exhalaciones largas sin forzar sueño.",
+                "sleep_environment": "Baja una sola fuente de estímulo: luz, ruido, pantalla o temperatura.",
+                "sleep_insomnia": "Sal un momento de la pelea con dormir: poca luz, sin pantalla y sin exigencia.",
+            }.get(sleep_subroute, "Baja la luz o apaga la pantalla y deja 5 a 10 minutos sin exigencia.")
             return self._make_engine_plan(
                 route_id=route_id,
                 subroute_id=sleep_subroute,
                 goal="one_sleep_step",
                 tone="claro_directo",
                 validation="",
-                main_response="Haz una sola accion real: baja la luz o apaga la pantalla y deja 5 a 10 minutos sin exigencia.",
+                main_response=sleep_text,
                 state_subroute_id=sleep_subroute,
                 tags=["one_step", "direct_answer"],
             )
@@ -2619,6 +2763,7 @@ class SupportFlowEngine:
         outcome: OutcomePolarity,
     ) -> Optional[ResponsePlan]:
         previous_state = dict(previous_frame.get("support_flow_state") or {})
+        previous_count = int(previous_state.get("action_followup_count", 0) or 0)
         if self._should_force_followup_exit_for_current(
             previous_state=previous_state,
             action_memory=action_memory,
@@ -2627,6 +2772,30 @@ class SupportFlowEngine:
                 route_id=route_id,
                 normalized=normalized,
                 outcome=outcome,
+            )
+
+        if outcome in {"no_change", "worse"}:
+            return self._build_followup_exit_plan(
+                route_id=route_id,
+                normalized=normalized,
+                outcome=outcome,
+            )
+
+        if outcome in {"partial_relief", "improved"}:
+            return self._build_hold_after_effect_plan(route_id=route_id, previous_state=previous_state)
+
+        if route_id == "crisis" and previous_count >= 1 and normalized in {"ya", "listo", "hecho"}:
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id="crisis_close_temporarily",
+                goal="hold_line",
+                tone="claro_directo",
+                validation="",
+                main_response="Bien. Por ahora no agregues otra indicacion: sosten la frase breve y el entorno mas bajo un momento.",
+                optional_followup="Si vuelve a subir o no baja nada, cambiamos una sola cosa o cerramos por ahora.",
+                close_softly=True,
+                state_subroute_id="crisis_close_temporarily",
+                tags=["hold", "post_action_followup"],
             )
 
         next_subroute = self._select_next_distinct_subroute(
@@ -2641,81 +2810,83 @@ class SupportFlowEngine:
             loop_cut=False,
         )
 
-        previous_count = int(previous_state.get("action_followup_count", 0) or 0)
-        active_subroute = str(
-            previous_state.get("active_subroute_id")
-            or previous_state.get("state_subroute_id")
-            or previous_state.get("subroute_id")
-            or ""
-        ).strip() or None
-
-        if route_id == "crisis" and previous_count >= 1 and normalized == "ya":
-            return self._make_engine_plan(
-                route_id=route_id,
-                subroute_id="crisis_close_temporarily",
-                goal="hold_line",
-                tone="claro_directo",
-                validation="",
-                main_response="Bien. Por ahora no agregues otra indicacion: sostén la frase breve y el entorno mas bajo un momento.",
-                optional_followup="Si vuelve a subir o no baja nada, ahi si cambiamos una sola cosa o cerramos por ahora.",
-                close_softly=True,
-                state_subroute_id="crisis_close_temporarily",
-                tags=["hold", "post_action_followup"],
-            )
-
+    def _build_hold_after_effect_plan(
+        self,
+        route_id: Domain,
+        previous_state: Dict[str, Any],
+    ) -> ResponsePlan:
+        active_subroute = self._current_subroute_from_state(previous_state)
         if route_id == "ansiedad":
             return self._make_engine_plan(
                 route_id=route_id,
-                subroute_id="anxiety_binary_decision",
-                goal="next_distinct_step",
+                subroute_id="anxiety_hold_after_partial_relief",
+                goal="hold_line",
                 tone="claro_directo",
-                validation="",
-                main_response="Ahora cierralo en una decision corta: o eso vence hoy, o no lo vas a mover por ahora.",
-                optional_followup="No abras otro frente todavia.",
-                state_subroute_id="anxiety_binary_decision",
-                tags=["next_step", "post_action_followup"],
+                validation="Bien, algo cedio.",
+                main_response="No metas otra tecnica ahora. Deja quieto lo demás y mantén solo lo que ya aflojó.",
+                close_softly=True,
+                state_subroute_id="anxiety_hold_after_partial_relief",
+                tags=["hold", "post_action_followup"],
             )
-
         if route_id == "bloqueo_ejecutivo":
             return self._make_engine_plan(
                 route_id=route_id,
-                subroute_id="executive_visible_next_step",
-                goal="next_distinct_step",
+                subroute_id=active_subroute or "executive_visible_next_step",
+                goal="hold_line",
                 tone="claro_directo",
-                validation="",
-                main_response="Ahora deja una sola salida visible: escribe solo el titulo o una primera linea minima.",
-                optional_followup="Si no sabes cual, dime la materia y te doy una.",
-                state_subroute_id="executive_visible_next_step",
-                tags=["next_step", "post_action_followup"],
+                validation="Bien, eso ya abrió la entrada.",
+                main_response="No intentes terminar ahora. Deja visible lo que abriste y para en ese punto si hace falta.",
+                close_softly=True,
+                state_subroute_id=active_subroute or "executive_visible_next_step",
+                tags=["hold", "post_action_followup"],
             )
-
         if route_id == "sueno":
             return self._make_engine_plan(
                 route_id=route_id,
-                subroute_id="sleep_followup",
+                subroute_id=active_subroute or "sleep_followup",
                 goal="hold_line",
-                tone="claro_directo",
-                validation="",
-                main_response="Ahora no sumes mas de una medida: sostén la baja de luz o pantalla 5 a 10 minutos.",
-                optional_followup="Si sigue igual después, cambiamos de vía, pero seguimos dentro del tema de sueño.",
+                tone="claro_suave",
+                validation="Bien, eso ya da una pista.",
+                main_response="Sostén solo lo que bajó el estímulo. No agregues otra medida esta noche.",
+                close_softly=True,
                 state_subroute_id=active_subroute or "sleep_followup",
                 tags=["hold", "post_action_followup"],
             )
-
         if route_id == "apoyo_infancia_neurodivergente":
             return self._make_engine_plan(
                 route_id=route_id,
-                subroute_id="child_co_regulation",
+                subroute_id=active_subroute or "child_co_regulation",
                 goal="hold_line",
                 tone="claro_directo",
-                validation="",
-                main_response="Ahora sosten una sola ayuda para tu hija/o: o presencia calmada, o frase corta, o menos estimulos.",
-                optional_followup="No metas varias cosas juntas. Mira si con una baja un poco.",
-                state_subroute_id="child_co_regulation",
+                validation="Bien, eso ya es una señal.",
+                main_response="Sostén esa misma ayuda para tu hija o hijo y no agregues otra indicación encima.",
+                close_softly=True,
+                state_subroute_id=active_subroute or "child_co_regulation",
                 tags=["hold", "post_action_followup"],
             )
-
-        return None
+        if route_id == "sobrecarga_cuidador":
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id=active_subroute or "caregiver_reduce_load",
+                goal="hold_line",
+                tone="calido_practico",
+                validation="Bien, eso ya baja una parte.",
+                main_response="No llenes ese espacio con otra carga. Deja esa parte suelta por ahora.",
+                close_softly=True,
+                state_subroute_id=active_subroute or "caregiver_reduce_load",
+                tags=["hold", "post_action_followup"],
+            )
+        return self._make_engine_plan(
+            route_id=route_id,
+            subroute_id=active_subroute or "pause_here",
+            goal="hold_line",
+            tone="claro_directo",
+            validation="Bien.",
+            main_response="Sostén solo lo que ya ayudó y no abras otro frente por ahora.",
+            close_softly=True,
+            state_subroute_id=active_subroute or "pause_here",
+            tags=["hold", "post_action_followup"],
+        )
 
     def _should_force_followup_exit(
         self,
@@ -3000,7 +3171,15 @@ class SupportFlowEngine:
     def _starting_point_response(self, route_id: Domain) -> str:
         if route_id == "bloqueo_ejecutivo":
             return "Empieza por la materia o tarea que mas urge hoy. Si no sabes cual, dime el nombre de una y partimos desde ahi."
-        return "Empieza por la accion mas pequena y visible de las que ya tenemos."
+        if route_id == "sueno":
+            return "Empieza por una condición de sueño: baja luz, pantalla o ruido durante unos minutos."
+        if route_id == "crisis":
+            return "Empieza por el entorno: menos ruido, menos preguntas o más espacio seguro."
+        if route_id == "apoyo_infancia_neurodivergente":
+            return "Empieza por una ayuda para tu hija o hijo: menos palabras, menos estímulos o una frase corta."
+        if route_id == "sobrecarga_cuidador":
+            return "Empieza por una carga que pueda esperar: una decisión, una tarea o una exigencia no urgente."
+        return "Empieza por una sola parte concreta del tema que traías."
 
     def _simple_action_explanation(self, route_id: Domain, instruction: str) -> str:
         if route_id == "bloqueo_ejecutivo" and not instruction:

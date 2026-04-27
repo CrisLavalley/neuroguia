@@ -208,6 +208,16 @@ class ResponseCurator:
         r"\bsuelta el aire una vez\b",
     )
 
+    SUPPORT_FLOW_TEMPLATE_BLOCK_PATTERNS = (
+        r"\bquedate con una sola cosa que baj[oa] la carga\b",
+        r"\bdime el punto exacto que qued[oa] confuso\b",
+        r"\bsi esto ya esta pesando mucho\b",
+        r"\bsi esto ya se siente demasiado\b",
+        r"\bcambio de via sin reciclar lo anterior\b",
+        r"\bhaz una sola accion visible\b",
+        r"\bel siguiente paso es dejar una sola accion\b",
+    )
+
     CRISIS_FORBIDDEN_PATTERNS = (
         r"\bpies en el piso\b",
         r"\bapoya los pies\b",
@@ -263,6 +273,58 @@ class ResponseCurator:
         r"\bexhalacion\b",
         r"\babre una nota con lo que te preocupa\b",
     )
+
+    CAREGIVER_FORBIDDEN_PATTERNS = (
+        r"\bpies en el piso\b",
+        r"\bapoya los pies\b",
+        r"\bexhalacion\b",
+        r"\babre (?:el )?(?:archivo|cuaderno|material)\b",
+        r"\bmateria urgente\b",
+        r"\btarea mas corta\b",
+        r"\bpreocupacion principal\b",
+    )
+
+    SUPPORT_FLOW_ROUTE_MARKERS = {
+        "crisis": ("ruido", "preguntas", "gente", "espacio", "frase", "discutas", "estimulos", "segura"),
+        "ansiedad": ("ansiedad", "preocupacion", "cuerpo", "aire", "nota", "decision", "tecnica"),
+        "sueno": ("sueno", "dormir", "pantalla", "luz", "ruido", "cama", "desvelo", "estimulo"),
+        "bloqueo ejecutivo": ("tarea", "archivo", "cuaderno", "material", "titulo", "linea", "materia"),
+        "apoyo infancia neurodivergente": ("hija", "hijo", "estimulos", "frase", "voz", "preocupacion", "rutina", "presencia"),
+        "sobrecarga cuidador": ("carga", "ayuda", "descanso", "seguridad", "tarea", "decision", "cuidado"),
+    }
+
+    SUPPORT_FLOW_ANCHOR_STOPWORDS = {
+        "ahora",
+        "solo",
+        "sola",
+        "esto",
+        "esta",
+        "este",
+        "para",
+        "pero",
+        "como",
+        "hace",
+        "hacer",
+        "haz",
+        "baja",
+        "deja",
+        "dejar",
+        "abre",
+        "sigue",
+        "sosten",
+        "sostenlo",
+        "primero",
+        "despues",
+        "todavia",
+        "todavia",
+        "momento",
+        "contigo",
+        "vamos",
+        "bien",
+        "gracias",
+        "quieres",
+        "puedes",
+    }
 
     def curate(
         self,
@@ -561,7 +623,7 @@ class ResponseCurator:
 
     def _support_flow_block_patterns(self, plan: Dict[str, Any]) -> List[str]:
         route_id = normalize_input(str(plan.get("route_id") or ""))
-        patterns: List[str] = []
+        patterns: List[str] = list(self.SUPPORT_FLOW_TEMPLATE_BLOCK_PATTERNS)
         if not self._support_flow_allows_grounding(plan):
             patterns.extend(self.GENERIC_SUPPORT_BLOCK_PATTERNS)
             patterns.extend(self.GENERIC_GROUNDING_BLOCK_PATTERNS)
@@ -571,10 +633,12 @@ class ResponseCurator:
             patterns.extend(self.SLEEP_FORBIDDEN_PATTERNS)
             if not self._support_flow_allows_sleep_note(plan):
                 patterns.extend(self.SLEEP_NOTE_FORBIDDEN_PATTERNS)
-        elif route_id == "bloqueo_ejecutivo":
+        elif route_id == "bloqueo ejecutivo":
             patterns.extend(self.EXECUTIVE_FORBIDDEN_PATTERNS)
-        elif route_id == "apoyo_infancia_neurodivergente":
+        elif route_id == "apoyo infancia neurodivergente":
             patterns.extend(self.CHILD_FORBIDDEN_PATTERNS)
+        elif route_id == "sobrecarga cuidador":
+            patterns.extend(self.CAREGIVER_FORBIDDEN_PATTERNS)
         return patterns
 
     def _support_flow_has_blocked_content(self, text: str, plan: Dict[str, Any]) -> bool:
@@ -615,10 +679,12 @@ class ResponseCurator:
             return "Abre una nota y escribe una sola línea con lo que pesa más ahora."
         if route_id == "sueno":
             return "Ajusta una sola cosa del entorno: luz, ruido o pantalla."
-        if route_id == "bloqueo_ejecutivo":
+        if route_id == "bloqueo ejecutivo":
             return "Deja una sola acción visible y mínima."
-        if route_id == "apoyo_infancia_neurodivergente":
+        if route_id == "apoyo infancia neurodivergente":
             return "Céntrate en tu hija o hijo: una frase corta, menos estímulos y una preocupación a la vez."
+        if route_id == "sobrecarga cuidador":
+            return "Baja una sola carga concreta: una decisión, una tarea o una exigencia que pueda esperar."
         return str(plan.get("main_response") or plan.get("next_step") or "").strip()
 
     def _support_flow_llm_text_is_usable(
@@ -636,7 +702,42 @@ class ResponseCurator:
             literal_norm = self._normalize(literal_phrase)
             if literal_norm and literal_norm not in candidate:
                 return False
+        if not self._support_flow_preserves_plan_core(text, support_flow_response_plan):
+            return False
         return True
+
+    def _support_flow_preserves_plan_core(self, text: str, plan: Dict[str, Any]) -> bool:
+        route_id = normalize_input(str(plan.get("route_id") or ""))
+        if route_id in {"general", "pregunta simple", "meta question", "cierre"}:
+            return True
+
+        normalized_text = normalize_input(text)
+        if not normalized_text:
+            return False
+
+        route_markers = self.SUPPORT_FLOW_ROUTE_MARKERS.get(route_id, ())
+        route_marker_seen = any(marker in normalized_text for marker in route_markers)
+
+        plan_core = normalize_input(
+            " ".join(
+                str(plan.get(key) or "")
+                for key in ("next_step", "literal_phrase", "main_response", "optional_followup")
+            )
+        )
+        anchors = {
+            token
+            for token in plan_core.split()
+            if len(token) >= 5 and token not in self.SUPPORT_FLOW_ANCHOR_STOPWORDS
+        }
+        if not anchors:
+            return route_marker_seen or bool(plan_core)
+
+        text_tokens = set(normalized_text.split())
+        overlap = anchors.intersection(text_tokens)
+        required_overlap = 1 if len(anchors) <= 4 else 2
+        if len(overlap) >= required_overlap:
+            return True
+        return route_marker_seen and bool(overlap)
 
     def _build_local_support_flow_text(
         self,
@@ -712,6 +813,37 @@ class ResponseCurator:
                 ],
                 chat_history,
             )
+        route_id = normalize_input(str(support_flow_response_plan.get("route_id") or ""))
+        next_step = str(
+            support_flow_response_plan.get("next_step")
+            or support_flow_response_plan.get("main_response")
+            or ""
+        ).strip().rstrip(".")
+        route_options = {
+            "sueno": [
+                f"Sigamos dentro del sueño: {next_step}.",
+                f"Para dormir, deja solo esto: {next_step}.",
+            ],
+            "bloqueo ejecutivo": [
+                f"Sigamos en la tarea: {next_step}.",
+                f"Para desbloquear, deja solo esta entrada: {next_step}.",
+            ],
+            "crisis": [
+                f"En la crisis, mantén el foco afuera: {next_step}.",
+                f"Para la crisis, una sola cosa del entorno: {next_step}.",
+            ],
+            "apoyo infancia neurodivergente": [
+                f"Para tu hija o hijo, sostén una sola ayuda: {next_step}.",
+                f"Con tu hija o hijo, no sumes más: {next_step}.",
+            ],
+            "sobrecarga cuidador": [
+                f"Para bajar carga de cuidado, deja solo esto: {next_step}.",
+                f"En cuidado, no tomes todo junto: {next_step}.",
+            ],
+        }
+        options = [option for option in route_options.get(route_id, []) if next_step]
+        if options:
+            return self._pick_non_repeated_variant(options, chat_history)
         return text
 
     def _finalize_support_flow_text(
@@ -836,6 +968,9 @@ class ResponseCurator:
             ("frio", "frío"),
             ("Mandibula", "Mandíbula"),
             ("mandibula", "mandíbula"),
+            ("Autorregulacion", "Autorregulación"),
+            ("autorregulacion", "autorregulación"),
+            ("dano", "daño"),
             ("pantalla fuera", "pantalla fuera"),
         ]
         for old, new in direct_replacements:
@@ -872,10 +1007,15 @@ class ResponseCurator:
             (r"\bexplicacion\b", "explicación"),
             (r"\bexplicaciones\b", "explicaciones"),
             (r"\btu hija/o\b", "tu hija o hijo"),
+            (r"\bno esta en\b", "no está en"),
         ]
         for pattern, replacement in regex_replacements:
             fixed = re.sub(pattern, replacement, fixed, flags=re.IGNORECASE)
 
+        fixed = fixed.replace("demásiado", "demasiado")
+        fixed = fixed.replace("Demásiado", "Demasiado")
+        fixed = fixed.replace("demásiada", "demasiada")
+        fixed = fixed.replace("Demásiada", "Demasiada")
         fixed = re.sub(r'"([^"]*)"', lambda match: f'"{match.group(1).strip()}"', fixed)
         fixed = re.sub(r"\s+([,.;:])", r"\1", fixed)
         fixed = re.sub(r"([,.;:])([^\s\"”])", r"\1 \2", fixed)
