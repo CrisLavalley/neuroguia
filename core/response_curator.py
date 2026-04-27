@@ -216,6 +216,10 @@ class ResponseCurator:
         r"\bcambio de via sin reciclar lo anterior\b",
         r"\bhaz una sola accion visible\b",
         r"\bel siguiente paso es dejar una sola accion\b",
+        r"\breciclar lo anterior\b",
+        r"\bmezclar\s+dominios\b",
+        r"\btomar\s+una\s+sola\s+ruta\b",
+        r"\bpalabra\s+del\s+tema\b",
     )
 
     CRISIS_FORBIDDEN_PATTERNS = (

@@ -331,10 +331,9 @@ class SupportFlowEngine:
         "ya lo dijiste",
         "ya dijiste eso",
         "ya me dijiste eso",
+        "eso ya me lo dijiste",
+        "eso ya me lo dijiste antes",
         "me acabas de decir eso",
-        "que mas",
-        "y luego",
-        "otra cosa",
     ]
     CRISIS_OTHER_REFERENCE_MARKERS = [
         "mi hijo",
@@ -619,7 +618,6 @@ class SupportFlowEngine:
     FOLLOWUP_EXIT_THRESHOLD = 4
     NEXT_DISTINCT_SUBROUTES: Dict[Domain, List[str]] = {
         "crisis": [
-            "crisis_initial",
             "crisis_literal_phrase",
             "crisis_first_step",
             "crisis_check_effect",
@@ -807,6 +805,7 @@ class SupportFlowEngine:
             "active": handled,
             "handled_by": "support_flow_engine",
             "route_id": route_id,
+            "active_route_id": route_id if handled and route_id in self.DOMAIN_LOCKABLE_ROUTES else None,
             "subroute_id": response_plan.subroute_id if response_plan else None,
             "active_subroute": active_subroute_id,
             "active_subroute_id": active_subroute_id,
@@ -1158,6 +1157,10 @@ class SupportFlowEngine:
             self._coerce_route(
                 support_state.get("route_id")
                 or support_state.get("active_domain_lock")
+                or support_state.get("active_route_id")
+                or support_state.get("active_route")
+                or previous_frame.get("active_route_id")
+                or previous_frame.get("active_route")
                 or support_state.get("pre_intercept_route")
                 or previous_frame.get("conversation_domain")
             )
@@ -1182,7 +1185,11 @@ class SupportFlowEngine:
         for candidate in [
             support_state.get("active_domain_lock"),
             support_state.get("pre_intercept_route"),
+            support_state.get("active_route_id"),
+            support_state.get("active_route"),
             support_state.get("route_id"),
+            previous_frame.get("active_route_id"),
+            previous_frame.get("active_route"),
             previous_frame.get("last_action_domain"),
             support_state.get("last_action_domain"),
             previous_frame.get("pre_intercept_domain"),
@@ -1209,7 +1216,12 @@ class SupportFlowEngine:
         normalized = self._normalize(text)
         previous_state = dict(previous_frame.get("support_flow_state") or {})
         locked_route = self._resolve_active_domain_lock(previous_frame=previous_frame)
-        effective_previous_route = locked_route or previous_route
+        control_route = self._coerce_route(
+            conversation_control.get("active_route_id")
+            or conversation_control.get("active_route")
+            or conversation_control.get("route_id")
+        )
+        effective_previous_route = locked_route or control_route or previous_route
 
         if turn_family == "meta_question":
             return "meta_question"
@@ -1539,6 +1551,40 @@ class SupportFlowEngine:
                 outcome=signal.outcome,
             )
 
+        if route_id == "bloqueo_ejecutivo" and self._contains_any(
+            normalized,
+            [
+                "dame opciones",
+                "dame tres opciones",
+                "quiero opciones",
+                "que opciones",
+                "qué opciones",
+                "como empiezo",
+                "cómo empiezo",
+                "como comienzo",
+                "por donde empiezo",
+                "que mas hago",
+                "qué mas hago",
+            ],
+        ):
+            return self._build_executive_distinct_plan(
+                subroute_id="strategy_switch",
+                prefix="",
+            )
+
+        if signal.turn_family == "specific_action_request" and self._has_recent_active_route(previous_frame):
+            next_subroute = self._select_next_distinct_subroute(
+                route_id=route_id,
+                normalized=normalized,
+                previous_state=dict(previous_frame.get("support_flow_state") or {}),
+                force_distinct=False,
+            )
+            return self._build_distinct_subroute_plan(
+                route_id=route_id,
+                subroute_id=next_subroute,
+                loop_cut=False,
+            )
+
         if signal.turn_family == "blocked_followup":
             blocked_plan = self._build_blocked_followup_plan(
                 route_id=route_id,
@@ -1570,6 +1616,10 @@ class SupportFlowEngine:
         last_action_domain = (
             previous_frame.get("last_action_domain")
             or support_state.get("last_action_domain")
+            or previous_frame.get("active_route_id")
+            or support_state.get("active_route_id")
+            or previous_frame.get("active_route")
+            or support_state.get("active_route")
             or previous_frame.get("conversation_domain")
             or support_state.get("conversation_domain")
             or self.ROUTE_TO_CONVERSATION_DOMAIN.get(fallback_route or "general", "apoyo_general")
@@ -1694,7 +1744,11 @@ class SupportFlowEngine:
         for candidate in [
             support_state.get("active_domain_lock"),
             support_state.get("pre_intercept_route"),
+            support_state.get("active_route_id"),
+            support_state.get("active_route"),
             support_state.get("route_id"),
+            previous_frame.get("active_route_id"),
+            previous_frame.get("active_route"),
             previous_frame.get("last_action_domain"),
             support_state.get("last_action_domain"),
             previous_frame.get("pre_intercept_domain"),
@@ -1971,10 +2025,16 @@ class SupportFlowEngine:
         if not self._is_loop_cut_request(normalized):
             return False
         previous_state = dict(previous_frame.get("support_flow_state") or {})
-        previous_route = self._coerce_route(previous_state.get("route_id"))
+        previous_route = self._coerce_route(
+            previous_state.get("route_id")
+            or previous_state.get("active_route_id")
+            or previous_frame.get("active_route_id")
+            or previous_state.get("active_domain_lock")
+            or previous_frame.get("conversation_domain")
+        )
         if previous_route and previous_route != route_id:
             return False
-        return bool(
+        return self._has_recent_active_route(previous_frame) or bool(
             previous_state.get("active_subroute")
             or previous_state.get("active_subroute_id")
             or previous_state.get("subroute_id")
@@ -2029,6 +2089,18 @@ class SupportFlowEngine:
             for item in list(previous_state.get("recent_subroutes") or [])
             if str(item or "").strip()
         ]
+
+        if force_distinct and not active_subroute:
+            forced_by_route = {
+                "crisis": "crisis_literal_phrase",
+                "ansiedad": "strategy_switch",
+                "bloqueo_ejecutivo": "strategy_switch",
+                "sueno": "sleep_followup",
+            }.get(route_id)
+            if forced_by_route:
+                return forced_by_route
+        if not active_subroute and route_id == "ansiedad":
+            return "anxiety_visible_action"
 
         if route_id == "sueno":
             sleep_branch = self._sleep_branch_from_text(normalized)
@@ -2098,7 +2170,7 @@ class SupportFlowEngine:
         subroute_id: str,
         loop_cut: bool = False,
     ) -> ResponsePlan:
-        prefix = "Bien. " if loop_cut else ""
+        prefix = "Tienes razón. No repito eso. " if loop_cut else ""
         if route_id == "crisis":
             return self._build_crisis_distinct_plan(subroute_id=subroute_id, prefix=prefix)
         if route_id == "ansiedad":
@@ -2123,6 +2195,8 @@ class SupportFlowEngine:
         )
 
     def _build_crisis_distinct_plan(self, subroute_id: str, prefix: str) -> ResponsePlan:
+        if subroute_id == "strategy_switch":
+            subroute_id = "crisis_literal_phrase"
         if subroute_id == "crisis_first_step":
             return self._make_engine_plan(
                 route_id="crisis",
@@ -2130,7 +2204,7 @@ class SupportFlowEngine:
                 goal="next_distinct_step",
                 tone="firme_claro",
                 validation="",
-                main_response=f"{prefix}Haz una sola cosa visible: baja ruido, corta preguntas o aleja gente de alrededor.",
+                main_response=f"{prefix}Cambia el entorno inmediato: baja ruido, corta preguntas o aleja gente de alrededor.",
                 next_step="Baja ruido, corta preguntas o aleja gente",
                 optional_followup="No expliques de mas ni metas varias indicaciones juntas.",
                 tags=["next_step", "crisis_progression"],
@@ -2153,9 +2227,9 @@ class SupportFlowEngine:
                 goal="next_distinct_step",
                 tone="firme_claro",
                 validation="",
-                main_response=f"{prefix}Usa una frase breve y no discutas:",
+                main_response=f"{prefix}Ahora usa una frase breve y mantén distancia segura:",
                 literal_phrase="Estoy aquí. No tienes que explicar nada. Vamos a bajar esto.",
-                optional_followup="Repitela igual, sin agregar explicaciones.",
+                optional_followup="Repitela igual, sin agregar explicaciones ni acercarte si no es seguro.",
                 tags=["next_step", "literal_phrase"],
             )
         return self._make_engine_plan(
@@ -2177,8 +2251,9 @@ class SupportFlowEngine:
                 goal="switch_strategy",
                 tone="claro_directo",
                 validation="",
-                main_response=f"{prefix}No repitamos la misma técnica. Pasa a una sola vía distinta: escribir la preocupación principal o cerrar por ahora.",
-                optional_followup="Elige una; no abras las dos.",
+                main_response=f"{prefix}Cambiamos de modalidad: ya no respiración. Ahora escribe una sola frase:",
+                literal_phrase="Lo que más me aprieta ahora es...",
+                optional_followup="No lo resuelvas todavía; solo déjalo escrito.",
                 state_subroute_id="anxiety_change_modality",
                 tags=["switch", "anxiety_progression"],
             )
@@ -2229,6 +2304,18 @@ class SupportFlowEngine:
         )
 
     def _build_executive_distinct_plan(self, subroute_id: str, prefix: str) -> ResponsePlan:
+        if subroute_id == "strategy_switch":
+            return self._make_engine_plan(
+                route_id="bloqueo_ejecutivo",
+                subroute_id="executive_visible_next_step",
+                goal="switch_strategy",
+                tone="claro_directo",
+                validation="",
+                main_response=f"{prefix}Te doy tres opciones: abrir el archivo, escribir el título o poner un temporizador de 2 minutos.",
+                optional_followup="Elige una; si no puedes elegir, empieza por abrir el archivo.",
+                state_subroute_id="executive_visible_next_step",
+                tags=["switch", "executive_options"],
+            )
         if subroute_id == "executive_initial":
             return self._make_engine_plan(
                 route_id="bloqueo_ejecutivo",
@@ -2278,6 +2365,8 @@ class SupportFlowEngine:
         )
 
     def _build_sleep_distinct_plan(self, subroute_id: str, prefix: str) -> ResponsePlan:
+        if subroute_id == "sleep_initial":
+            subroute_id = "sleep_followup"
         if subroute_id == "strategy_switch":
             return self._make_engine_plan(
                 route_id="sueno",
@@ -2285,8 +2374,8 @@ class SupportFlowEngine:
                 goal="switch_strategy",
                 tone="claro_suave",
                 validation="",
-                main_response=f"{prefix}No sigas peleando con dormir. Cambia solo una condición de sueño: pantalla fuera, luz baja o ruido más bajo.",
-                optional_followup="Después sostén eso unos minutos sin exigirte dormir ya.",
+                main_response=f"{prefix}Entonces vamos a una rutina de bajada: baja luz o pantalla 10 minutos.",
+                optional_followup="Si tu mente sigue acelerada, escribe una sola preocupación y ciérrala.",
                 state_subroute_id="sleep_followup",
                 tags=["switch", "sleep_progression"],
             )
@@ -2298,7 +2387,7 @@ class SupportFlowEngine:
                 tone="claro_suave",
                 validation="",
                 main_response=f"{prefix}Ahora sostén una rutina de bajada: baja pantalla o luz por 10 minutos.",
-                optional_followup="No agregues otra medida mientras observas si el cuerpo afloja.",
+                optional_followup="Si tu mente sigue acelerada, escribe una sola preocupación y ciérrala.",
                 tags=["next_step", "hold_sleep_step"],
             )
         if subroute_id == "sleep_mind_racing":

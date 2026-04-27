@@ -303,7 +303,7 @@ class LLMGateway:
             rules.append("No cambies route_id, subroute_id, objetivo, seguridad, dominio ni tipo de accion. Solo redacta mejor el plan recibido.")
             rules.append("La respuesta final debe conservar palabras-ancla de la accion central del plan; si el plan habla de sueño, infancia, crisis, tarea o cuidador, ese dominio debe verse en el texto final.")
             rules.append("No agregues grounding, validacion emocional generica ni tecnicas de ansiedad si no aparecen en el plan.")
-            rules.append("No uses plantillas recicladas como 'Quédate con una sola cosa que bajó la carga', 'Dime el punto exacto que quedó confuso', 'Cambio de vía sin reciclar lo anterior' o 'Haz una sola acción visible'.")
+            rules.append("No uses plantillas recicladas, mecánica interna, ni mensajes donde la persona deba escoger dominio cuando ya hay ruta activa.")
             rules.append("Bloquea estas frases salvo subruta ansiedad_grounding: 'Tiene sentido que esto te este pesando', 'Vamos primero a bajar la activacion', 'pies en el piso', 'exhalacion mas larga'.")
             route_id = normalize_input(str(support_flow_response_plan.get("route_id") or ""))
             subroute_id = normalize_input(str(support_flow_response_plan.get("subroute_id") or ""))

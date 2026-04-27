@@ -1531,8 +1531,8 @@ def playbook_clarification(signal: UserSignal) -> ResponsePlan:
         subroute_id="i_dont_understand",
         goal="clarify_in_one_step",
         tone="claro_calido",
-        validation="Sí, lo bajo más sin cambiarte de tema.",
-        main_response="Dime si esto va de sueño, tarea, crisis, ansiedad o apoyo para tu hija o hijo, y lo vuelvo un paso de esa ruta.",
+        validation="Sí, lo bajo más.",
+        main_response="Toma solo el paso anterior y dime qué parte concreta no se entendió: la frase, el inicio o el siguiente movimiento.",
         tags=["clarification"],
     )
 
@@ -1556,8 +1556,8 @@ def playbook_strategy_rejection(signal: UserSignal) -> ResponsePlan:
         goal="change_strategy_without_pressure",
         tone="calido_claro",
         validation="Tienes razón en marcarlo.",
-        main_response="No voy a reciclar lo anterior. Para no mezclar dominios, necesito tomar una sola ruta: sueño, tarea, crisis, ansiedad o apoyo para tu hija o hijo.",
-        optional_followup="Si no quieres elegir, dime una palabra del tema y lo cierro yo.",
+        main_response="Tienes razón. No repito eso. Vamos con un paso distinto y más concreto.",
+        optional_followup="Si no puedes elegir, tomo el paso más simple y seguimos desde ahí.",
         tags=["strategy_rejection", "change_path"],
     )
 
@@ -1569,8 +1569,8 @@ def playbook_next_step(signal: UserSignal) -> ResponsePlan:
         goal="offer_next_step_without_reset",
         tone="calido_directo",
         validation="Bien, seguimos sin abrir de mas.",
-        main_response="Para no darte una salida genérica, dime si esto va de sueño, tarea, crisis, ansiedad, cuidador o apoyo para tu hija o hijo.",
-        optional_followup="Con esa palabra te doy solo el primer paso.",
+        main_response="Sigue con una sola cosa concreta de lo que ya traías.",
+        optional_followup="Si te trabas, toma el paso más pequeño disponible y no abras otro frente.",
         tags=["next_step"],
     )
 
