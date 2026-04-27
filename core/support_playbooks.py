@@ -468,7 +468,7 @@ def _child_support_track(signal: UserSignal) -> str:
     active = _active_subroute(signal)
     if _has_any(text, ["escuela", "maestra", "maestro", "familia", "hermano", "hermana", "visita", "social"]):
         return "child_social_or_family_context"
-    if _has_any(text, ["sobrepiensa", "sobrepensamiento", "le da muchas vueltas", "piensa demasiado"]):
+    if _has_any(text, ["sobrepiensa", "sobre pensar", "sobrepensar", "sobrepensamiento", "le da muchas vueltas", "piensa demasiado"]):
         return "child_overthinking_support"
     if _has_any(text, ["saturacion", "se satura", "sobrecarga", "demasiado estimulo", "demasiado ruido"]):
         return "child_saturation_support"
@@ -697,8 +697,8 @@ def playbook_crisis(signal: UserSignal) -> ResponsePlan:
                 tone="firme_claro",
                 validation="Si, aqui sigo.",
                 main_response="Ahora sosten una sola frase breve y quedate presente sin discutir.",
-                literal_phrase="Estoy aqui contigo. Primero vamos a bajar esto.",
-                optional_followup="Si no baja nada con eso, cambiamos una sola cosa mas del entorno.",
+                literal_phrase="Estoy aquí. No tienes que explicar nada. Vamos a bajar esto.",
+                optional_followup="Mantén distancia segura y no discutas.",
                 tags=["crisis", "seguimiento"],
             )
         return _plan(
@@ -1084,12 +1084,12 @@ def playbook_sleep(signal: UserSignal) -> ResponsePlan:
             subroute_id="sleep_followup",
             goal="change_sleep_modality",
             tone="calido_claro",
-            validation="Gracias por decirlo. No voy a repetirte lo mismo si asi no ayuda.",
+            validation="Tienes razón, eso no fue suficientemente directo para dormir.",
             main_response=(
-                "Cambiemos de vía dentro del sueño: si la mente no para, la sacamos al papel; "
-                "si el cuerpo esta arriba, bajamos cuerpo; si el entorno molesta, ajustamos una sola cosa."
+                "Vamos a algo más concreto: apaga o aleja la pantalla, baja la luz y deja una rutina de "
+                "10 minutos sin exigirte dormir todavía."
             ),
-            optional_followup="Si quieres, elijo yo por donde conviene empezar segun lo que mas pesa.",
+            optional_followup="Si la mente sigue acelerada, sacas una sola preocupación a papel y cierras la nota.",
             state_subroute_id=track if track != "sleep_initial" else "sleep_followup",
             tags=["sueno", "cambio_de_via"],
         )
@@ -1225,12 +1225,15 @@ def playbook_child_support(signal: UserSignal) -> ResponsePlan:
     if signal.turn_family == "strategy_rejection":
         return _plan(
             route_id="apoyo_infancia_neurodivergente",
-            subroute_id="child_co_regulation",
+            subroute_id=track if track in set(PLAYBOOK_CATALOG["apoyo_infancia_neurodivergente"]) else "child_overthinking_support",
             goal="repair_child_support_path",
             tone="calido_claro",
-            validation="Gracias por decirmelo. No voy a dejarte con una salida que no ayude.",
-            main_response="Volvamos a una base mas segura: presencia calmada, voz baja y una sola referencia clara.",
-            optional_followup="Si hace falta, despues pasamos a frase corta o a menos estimulos.",
+            validation="Tienes razón. Me centro en tu hija o hijo.",
+            main_response=(
+                "Para ayudarle a sobrepensar menos, no le des muchas explicaciones. "
+                "Ayúdale a elegir una sola preocupación y acompáñale a bajarla a palabras."
+            ),
+            optional_followup="Una preocupación a la vez; no abran todas las demás juntas.",
             tags=["child_support", "cambio_de_via"],
         )
 
@@ -1298,10 +1301,10 @@ def playbook_child_support(signal: UserSignal) -> ResponsePlan:
             subroute_id=track,
             goal="child_overthinking_support",
             tone="calido_contenedor",
-            validation="Si, cuando una hija/o sobrepiensa, meter mas explicaciones suele cargar mas.",
-            main_response="Ayudale a sacar una sola preocupacion de la cabeza al papel o a voz. Una sola.",
-            next_step="Sacar una sola preocupacion de la cabeza al papel o a voz",
-            optional_followup="Despues miran solo esa.",
+            validation="Claro. Si quien está sobrepensando es tu hija o hijo, no intentaría convencerle con muchas explicaciones.",
+            main_response="Ayuda más bajar velocidad: pídele que saque una sola preocupación, en voz o en papel. Una sola.",
+            next_step="Sacar una sola preocupación, en voz o en papel",
+            optional_followup="Luego pueden mirarla juntas sin abrir todas las demás.",
             tags=["child_support", "sobrepensamiento"],
         )
     if track == "child_saturation_support":
@@ -1528,8 +1531,8 @@ def playbook_clarification(signal: UserSignal) -> ResponsePlan:
         subroute_id="i_dont_understand",
         goal="clarify_in_one_step",
         tone="claro_calido",
-        validation="Si, te lo digo mas simple.",
-        main_response="Vamos con una sola idea y una sola cosa a la vez.",
+        validation="Sí, lo bajo más.",
+        main_response="Dime el punto exacto que quedó confuso y lo convierto en un paso concreto.",
         tags=["clarification"],
     )
 
@@ -1552,8 +1555,8 @@ def playbook_strategy_rejection(signal: UserSignal) -> ResponsePlan:
         subroute_id="strategy_switch",
         goal="change_strategy_without_pressure",
         tone="calido_claro",
-        validation="Gracias por decir que por ahi no te sirve.",
-        main_response="Entonces cambiamos de enfoque de verdad. Te ofrezco algo mas directo, mas corto o por otra via, sin reciclar lo anterior.",
+        validation="Tienes razón en marcarlo.",
+        main_response="Cambio de vía sin reciclar lo anterior: te doy una salida más directa y ligada al tema que traías.",
         optional_followup="Si no quieres elegir, elijo yo la opcion mas simple para este momento.",
         tags=["strategy_rejection", "change_path"],
     )

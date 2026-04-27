@@ -89,12 +89,6 @@ class LLMGateway:
             or decision_payload.get("support_flow_response_plan")
             or {}
         )
-        if support_flow_response_plan:
-            return {
-                "allowed": False,
-                "reason": "support_flow_locked_to_response_curator",
-                "request_payload": None,
-            }
         response_goal = decision_payload.get("response_goal", {}) or {}
         constraints = fallback_payload.get("constraints", {}) or {}
 
@@ -183,8 +177,6 @@ class LLMGateway:
         request_payload = request_payload or {}
         if not request_payload:
             return self._build_stub_fallback_result(request_payload=request_payload, reason="empty_request_payload")
-        if request_payload.get("support_flow_response_plan"):
-            return self._build_locked_support_flow_result(request_payload)
         if not self._is_openai_llm_enabled():
             return self._build_stub_fallback_result(request_payload=request_payload, reason="llm_disabled_by_env", llm_enabled=False)
 
@@ -308,14 +300,21 @@ class LLMGateway:
         if support_flow_response_plan:
             rules.append("Conserva la validacion, la accion central, la frase literal y el tipo de cierre del support_flow_response_plan.")
             rules.append("Puedes corregir ortografia, tildes, naturalidad y calidez, pero no debes mover la ruta conductual.")
+            rules.append("No cambies route_id, subroute_id, objetivo, seguridad, dominio ni tipo de accion. Solo redacta mejor el plan recibido.")
             rules.append("No agregues grounding, validacion emocional generica ni tecnicas de ansiedad si no aparecen en el plan.")
             rules.append("Bloquea estas frases salvo subruta ansiedad_grounding: 'Tiene sentido que esto te este pesando', 'Vamos primero a bajar la activacion', 'pies en el piso', 'exhalacion mas larga'.")
             route_id = normalize_input(str(support_flow_response_plan.get("route_id") or ""))
             subroute_id = normalize_input(str(support_flow_response_plan.get("subroute_id") or ""))
             if route_id == "crisis":
-                rules.append("Ruta crisis: usa solo acciones externas, control del entorno y frases breves; no uses introspeccion, grounding corporal ni respiracion.")
+                rules.append("Ruta crisis: usa solo entorno, bajar demanda, distancia segura, frase breve, no discutir y no explicar demasiado. Prohibido: pies en el piso, exhalacion, abrir notas o escribir preocupaciones.")
             if route_id == "sueno":
-                rules.append("Ruta sueño: usa solo estimulos, entorno y mente versus cuerpo; no uses grounding emocional.")
+                rules.append("Ruta sueño: usa luz, pantalla, ruido, rutina de bajada, mente acelerada, cuerpo activado o entorno. Prohibido: presion real, decision de tareas y grounding de ansiedad.")
+                if subroute_id != "sleep mind racing":
+                    rules.append("En sueño, no uses nota de preocupacion salvo si la subruta es sleep_mind_racing o el plan menciona mente acelerada.")
+            if route_id == "bloqueo ejecutivo":
+                rules.append("Ruta bloqueo ejecutivo: da paso visible, abrir material, elegir materia urgente, escribir titulo o dividir tarea. Prohibido responder con ansiedad generica.")
+            if route_id == "apoyo infancia neurodivergente":
+                rules.append("Ruta infancia: centra la respuesta en la hija/hijo, sobrepensamiento, corregulacion, frases cortas, bajar estimulos o anticipar. No hables como si el problema fuera de la madre.")
             if subroute_id:
                 rules.append(f"Subruta bloqueada por el flow_engine: {support_flow_response_plan.get('subroute_id')}.")
         if conversation_control.get("turn_family") == "post_action_followup":
@@ -495,26 +494,6 @@ class LLMGateway:
         stub_result["llm_enabled"] = llm_enabled
         stub_result["generation_metadata"] = self._build_generation_metadata(request_payload, "stub_local", "local_stub", True, reason, llm_enabled)
         return stub_result
-
-    def _build_locked_support_flow_result(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "response_text": "",
-            "response_structure": self._extract_structure(""),
-            "llm_confidence_hint": 0.0,
-            "provider": "support_flow_locked",
-            "model": "none",
-            "used_stub_fallback": True,
-            "fallback_reason": "support_flow_locked_to_response_curator",
-            "llm_enabled": False,
-            "generation_metadata": self._build_generation_metadata(
-                request_payload,
-                "support_flow_locked",
-                "none",
-                True,
-                "support_flow_locked_to_response_curator",
-                False,
-            ),
-        }
 
     def _build_generation_metadata(self, request_payload: Dict[str, Any], provider: str, model: str, used_stub_fallback: bool, fallback_reason: Optional[str], llm_enabled: bool) -> Dict[str, Any]:
         case_summary = request_payload.get("case_summary", {}) or {}

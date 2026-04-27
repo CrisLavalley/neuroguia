@@ -176,6 +176,10 @@ class SupportFlowEngine:
         "post_action_followup",
         "clarification_request",
         "literal_phrase_request",
+        "blocked_followup",
+        "specific_action_request",
+        "strategy_rejection",
+        "outcome_report",
     }
 
     DIRECT_FAMILIES = {"meta_question", "simple_question"}
@@ -207,6 +211,18 @@ class SupportFlowEngine:
         "eso no funciona",
         "otra cosa",
         "no quiero seguir por ahi",
+        "eso no es",
+        "eso no era",
+        "no es lo que pregunte",
+        "no es lo que pregunté",
+        "eso no es lo que pregunte",
+        "eso no es lo que pregunté",
+        "eso no fue",
+        "pero eso no",
+        "yo la del problema",
+        "yo el del problema",
+        "la del problema es",
+        "el del problema es",
     ]
     BLOCKED_MARKERS = [
         "no se",
@@ -239,6 +255,8 @@ class SupportFlowEngine:
         "que linea",
         "que tipo",
         "por donde",
+        "dime como",
+        "dime cómo",
         "como",
         "cual",
     ]
@@ -251,6 +269,10 @@ class SupportFlowEngine:
         "que sigue",
         "que tipo",
         "que frase",
+        "dime como",
+        "dime cómo",
+        "dime que hago",
+        "dime qué hago",
         "linea de que",
     ]
     POST_ACTION_MARKERS = [
@@ -271,12 +293,22 @@ class SupportFlowEngine:
         "y luego",
         "que sigue",
         "que mas",
+        "dime",
+        "dime como",
+        "dime cómo",
+        "tu dime",
+        "tú dime",
+        "ayudame",
+        "ayúdame",
         "y despues",
         "y ahora que",
         "seguimos",
         "continua",
         "continuemos",
         "dale",
+        "ok dime",
+        "ok ayudame",
+        "ok ayúdame",
     ]
     CONFIRMATION_MARKERS = [
         "ok",
@@ -375,11 +407,41 @@ class SupportFlowEngine:
     CHILD_TARGET_MARKERS = [
         "mi hijo",
         "mi hija",
+        "mi niña",
+        "mi nino",
+        "mi niño",
+        "mi adolescente",
         "mis hijos",
+    ]
+    CHILD_PRONOUN_TARGET_MARKERS = [
+        "ella",
+        "el",
+        "él",
+    ]
+    CHILD_CONCERN_MARKERS = [
+        "sobrepensar",
+        "sobre piensa",
+        "sobrepiensa",
+        "sobrepens",
+        "ansiedad",
+        "crisis",
+        "saturada",
+        "saturado",
+        "no duerme",
+        "se altera",
+        "se bloquea",
+        "bloquea",
+        "problema es",
+        "la del problema",
+        "el del problema",
     ]
     CHILD_SUPPORT_MARKERS = [
         "como ayudo a mi hija",
         "como ayudo a mi hijo",
+        "como ayudar a mi hija",
+        "como ayudar a mi hijo",
+        "ayudar a mi hija",
+        "ayudar a mi hijo",
         "como ayudo a mis hijos",
         "como le ayudo",
         "como lo ayudo",
@@ -388,6 +450,14 @@ class SupportFlowEngine:
         "como la acompano",
         "como le digo",
         "que le digo",
+        "mi hija tiene ansiedad",
+        "mi hijo tiene ansiedad",
+        "mi hija no duerme",
+        "mi hijo no duerme",
+        "mi niña no duerme",
+        "mi niño no duerme",
+        "se altera",
+        "se bloquea",
         "sobrepiensa",
         "sobrepens",
         "se satura",
@@ -479,6 +549,9 @@ class SupportFlowEngine:
         "bloqueo_ejecutivo": [
             "no puedo empezar",
             "no puedo arrancar",
+            "no puedo organizarme",
+            "organizarme",
+            "organizar",
             "bloqueada",
             "bloqueado",
             "tarea",
@@ -543,13 +616,13 @@ class SupportFlowEngine:
         "outcome_report",
     }
     FOLLOWUP_EXIT_GOALS = {"close_temporarily", "decide_one_path", "switch_strategy"}
-    FOLLOWUP_EXIT_THRESHOLD = 2
+    FOLLOWUP_EXIT_THRESHOLD = 4
     NEXT_DISTINCT_SUBROUTES: Dict[Domain, List[str]] = {
         "crisis": [
             "crisis_initial",
+            "crisis_literal_phrase",
             "crisis_first_step",
             "crisis_check_effect",
-            "crisis_literal_phrase",
             "crisis_close_temporarily",
         ],
         "ansiedad": [
@@ -573,6 +646,7 @@ class SupportFlowEngine:
             "enough_for_now",
         ],
         "apoyo_infancia_neurodivergente": [
+            "child_overthinking_support",
             "child_co_regulation",
             "child_clear_communication",
             "child_reduce_stimuli",
@@ -878,16 +952,16 @@ class SupportFlowEngine:
         }
 
         fallback_payload = {
-            "use_llm": False,
-            "fallback_reason": "support_flow_locked_to_local_humanizer",
+            "use_llm": bool(result.response_plan.humanization_required),
+            "fallback_reason": "support_flow_humanization",
             "prompt_mode": "support_flow_humanization",
             "should_learn_if_good": False,
             "prefer_support_flow_local_humanizer": True,
         }
 
         llm_policy = {
-            "should_use_llm": False,
-            "reason": "support_flow_locked_to_local_humanizer",
+            "should_use_llm": bool(result.response_plan.humanization_required),
+            "reason": "support_flow_humanization",
             "prompt_mode": "support_flow_humanization",
             "domain": result.conversation_domain,
             "phase": phase,
@@ -1132,6 +1206,8 @@ class SupportFlowEngine:
 
         if turn_family == "meta_question":
             return "meta_question"
+        if self._has_child_support_signal(normalized):
+            return "apoyo_infancia_neurodivergente"
         if self._should_keep_crisis_domain(
             previous_route=effective_previous_route,
             normalized=normalized,
@@ -1173,12 +1249,12 @@ class SupportFlowEngine:
         if effective_previous_route and turn_family in self.FOLLOWUP_FAMILIES:
             return effective_previous_route
 
+        if self._has_child_support_signal(normalized):
+            return "apoyo_infancia_neurodivergente"
         if self._contains_any(normalized, self.ROUTE_TEXT_MARKERS.get("crisis", [])):
             return "crisis"
         if self._has_strong_caregiver_signal(normalized):
             return "sobrecarga_cuidador"
-        if self._has_child_support_signal(normalized):
-            return "apoyo_infancia_neurodivergente"
         if self._has_strong_sleep_signal(normalized):
             return "sueno"
 
@@ -1214,6 +1290,8 @@ class SupportFlowEngine:
             return "closure_or_pause"
         if self._looks_like_outcome_report(normalized):
             return "outcome_report"
+        if self._contains_any(normalized, self.BLOCKED_MARKERS):
+            return "blocked_followup"
         if has_active_action and self._looks_like_current_action_clarification(normalized):
             if self._wants_literal_phrase(normalized=normalized, action_memory=action_memory):
                 return "literal_phrase_request"
@@ -1228,8 +1306,6 @@ class SupportFlowEngine:
             return "post_action_followup"
         if self._contains_any(normalized, self.CLARIFICATION_MARKERS):
             return "clarification_request"
-        if self._contains_any(normalized, self.BLOCKED_MARKERS):
-            return "blocked_followup"
         if self._is_simple_confirmation(compact=compact, previous_frame=previous_frame):
             return "followup_acceptance"
         if self._contains_any(normalized, self.NEXT_STEP_MARKERS):
@@ -1567,10 +1643,16 @@ class SupportFlowEngine:
 
     def _has_child_support_signal(self, normalized: str) -> bool:
         has_child_target = self._contains_any(normalized, self.CHILD_TARGET_MARKERS)
+        has_pronoun_target = any(re.search(rf"\b{re.escape(normalize_input(marker))}\b", normalized) for marker in self.CHILD_PRONOUN_TARGET_MARKERS)
+        has_child_concern = self._contains_any(normalized, self.CHILD_CONCERN_MARKERS)
+        if has_pronoun_target and has_child_concern:
+            has_child_target = True
         if not has_child_target:
             return False
         if self._has_strong_caregiver_signal(normalized):
             return False
+        if has_child_concern:
+            return True
         if self._contains_any(normalized, self.CHILD_SUPPORT_MARKERS):
             return True
         return any(token in normalized for token in {"como ayudo", "que le digo", "que hago con"})
@@ -1617,6 +1699,9 @@ class SupportFlowEngine:
         normalized: str,
         conversation_control: Dict[str, Any],
     ) -> Optional[Domain]:
+        if self._has_child_support_signal(normalized):
+            return "apoyo_infancia_neurodivergente"
+
         if self._is_external_crisis_request(normalized):
             return "crisis"
 
@@ -1635,11 +1720,11 @@ class SupportFlowEngine:
         if self._contains_any(normalized, self.ROUTE_TEXT_MARKERS.get("crisis", [])):
             return "crisis"
 
-        if self._has_strong_caregiver_signal(normalized):
-            return "sobrecarga_cuidador"
-
         if self._has_child_support_signal(normalized):
             return "apoyo_infancia_neurodivergente"
+
+        if self._has_strong_caregiver_signal(normalized):
+            return "sobrecarga_cuidador"
 
         for route_id, markers in self.EXPLICIT_DOMAIN_SHIFT_MARKERS.items():
             if self._contains_any(normalized, markers):
@@ -1947,6 +2032,8 @@ class SupportFlowEngine:
             }.get(active_subroute or "")
             if executive_alias_next:
                 return executive_alias_next
+        if route_id == "apoyo_infancia_neurodivergente" and active_subroute == "child_overthinking_support":
+            return "child_overthinking_support"
 
         if active_subroute in sequence:
             start_index = sequence.index(active_subroute) + 1
@@ -1993,7 +2080,7 @@ class SupportFlowEngine:
         subroute_id: str,
         loop_cut: bool = False,
     ) -> ResponsePlan:
-        prefix = "Si, no repito eso. " if loop_cut else ""
+        prefix = "Bien. " if loop_cut else ""
         if route_id == "crisis":
             return self._build_crisis_distinct_plan(subroute_id=subroute_id, prefix=prefix)
         if route_id == "ansiedad":
@@ -2047,7 +2134,7 @@ class SupportFlowEngine:
                 tone="firme_claro",
                 validation="",
                 main_response=f"{prefix}Usa una frase breve y no discutas:",
-                literal_phrase="Estoy aqui contigo. No hace falta hablar mucho ahora.",
+                literal_phrase="Estoy aquí. No tienes que explicar nada. Vamos a bajar esto.",
                 optional_followup="Repitela igual, sin agregar explicaciones.",
                 tags=["next_step", "literal_phrase"],
             )
@@ -2154,8 +2241,8 @@ class SupportFlowEngine:
                 goal="next_distinct_step",
                 tone="claro_suave",
                 validation="",
-                main_response=f"{prefix}Ahora no sumes medidas: sosten luz baja o pantalla fuera 5 a 10 minutos.",
-                optional_followup="Después vemos si pesa más la mente, el cuerpo o el entorno.",
+                main_response=f"{prefix}Ahora sostén una rutina de bajada: baja pantalla o luz por 10 minutos.",
+                optional_followup="Si el problema es mente acelerada, escribe una sola preocupación en una nota y ciérrala.",
                 tags=["next_step", "hold_sleep_step"],
             )
         if subroute_id == "sleep_mind_racing":
@@ -2205,6 +2292,21 @@ class SupportFlowEngine:
         )
 
     def _build_child_distinct_plan(self, subroute_id: str, prefix: str) -> ResponsePlan:
+        if subroute_id == "child_overthinking_support":
+            return self._make_engine_plan(
+                route_id="apoyo_infancia_neurodivergente",
+                subroute_id=subroute_id,
+                goal="next_distinct_step",
+                tone="claro_directo",
+                validation="",
+                main_response=(
+                    f"{prefix}Si quien está sobrepensando es tu hija o hijo, baja velocidad: "
+                    "saquen una sola preocupación, en voz o en papel, y miren solo esa."
+                ),
+                next_step="Sacar una sola preocupación, en voz o en papel",
+                optional_followup="No abran todas las demás preocupaciones al mismo tiempo.",
+                tags=["next_step", "child_overthinking"],
+            )
         if subroute_id == "child_clear_communication":
             return self._make_engine_plan(
                 route_id="apoyo_infancia_neurodivergente",
@@ -2227,6 +2329,17 @@ class SupportFlowEngine:
                 main_response=f"{prefix}Baja una sola cosa del entorno para tu hija/o: luz, ruido, gente o preguntas.",
                 next_step="Baja una sola cosa del entorno",
                 tags=["next_step", "reduce_stimuli"],
+            )
+        if subroute_id == "child_co_regulation":
+            return self._make_engine_plan(
+                route_id="apoyo_infancia_neurodivergente",
+                subroute_id=subroute_id,
+                goal="next_distinct_step",
+                tone="claro_directo",
+                validation="",
+                main_response=f"{prefix}Quédate en una ayuda para tu hija o hijo: presencia calmada, voz baja y una frase corta.",
+                literal_phrase="Estoy aquí. Vamos con una sola cosa.",
+                tags=["next_step", "co_regulation"],
             )
         return self._make_engine_plan(
             route_id="apoyo_infancia_neurodivergente",
@@ -2346,6 +2459,21 @@ class SupportFlowEngine:
                 tags=["clarify_current_action", "sleep"],
             )
 
+        if route_id == "bloqueo_ejecutivo" and self._contains_any(normalized, ["dime como", "dime cómo", "como lo hago", "cómo lo hago"]):
+            return self._make_engine_plan(
+                route_id=route_id,
+                subroute_id="executive_visible_next_step",
+                goal="clarify_current_action",
+                tone="claro_directo",
+                validation="",
+                main_response=(
+                    "Hazlo así: abre el material más cercano, ponle un título mínimo y deja una primera línea aunque sea fea."
+                ),
+                optional_followup="No ordenes todo todavía; solo deja esa entrada visible.",
+                state_subroute_id=active_subroute or "executive_visible_next_step",
+                tags=["clarify_current_action", "executive_step"],
+            )
+
         if last_action_type in {"executive_step", "action_step"} and "linea de que" in normalized:
             return self._make_engine_plan(
                 route_id=route_id,
@@ -2454,8 +2582,11 @@ class SupportFlowEngine:
                 goal="lower_demand_for_block",
                 tone="claro_directo",
                 validation="",
-                main_response="Haz solo esto: abre una sola materia o tarea. Nada mas.",
-                optional_followup="Si no sabes cual elegir, yo te ayudo a escoger la mas urgente.",
+                main_response=(
+                    "Entonces no empieces por organizar. Haz esto: abre el cuaderno, archivo o material "
+                    "que tengas más cerca."
+                ),
+                optional_followup="Si no sabes cuál, dime las opciones y elegimos una.",
                 state_subroute_id=active_subroute or "executive_initial",
                 tags=["lower_demand", "direct_answer"],
             )

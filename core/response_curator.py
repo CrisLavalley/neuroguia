@@ -215,6 +215,9 @@ class ResponseCurator:
         r"\binhala\b",
         r"\bexhala\b",
         r"\bexhalacion\b",
+        r"\babre una nota\b",
+        r"\bescribe (?:una )?(?:linea|preocupacion)\b",
+        r"\bpreocupacion principal\b",
         r"\bansiedad\b",
         r"\bintrospeccion\b",
         r"\bemocion(?:al|es)?\b",
@@ -227,6 +230,38 @@ class ResponseCurator:
         r"\bapoya los pies\b",
         r"\btiene sentido que esto te este pesando\b",
         r"\bvamos primero a bajar(?: un poco)? la activacion\b",
+        r"\bpresion real\b",
+        r"\bdecision de tareas\b",
+        r"\bmateria urgente\b",
+        r"\btarea mas corta\b",
+        r"\babre (?:el )?(?:archivo|cuaderno|material)\b",
+    )
+
+    SLEEP_NOTE_FORBIDDEN_PATTERNS = (
+        r"\babre una nota\b",
+        r"\bnota de preocupacion\b",
+        r"\bescribe (?:una )?preocupacion\b",
+        r"\bpreocupacion principal\b",
+    )
+
+    EXECUTIVE_FORBIDDEN_PATTERNS = (
+        r"\bpies en el piso\b",
+        r"\bapoya los pies\b",
+        r"\bexhalacion\b",
+        r"\bsuelta el aire\b",
+        r"\bansiedad\b",
+        r"\bpreocupacion principal\b",
+        r"\babre una nota\b",
+    )
+
+    CHILD_FORBIDDEN_PATTERNS = (
+        r"\btu ansiedad\b",
+        r"\btu cansancio\b",
+        r"\brespira\b",
+        r"\bpies en el piso\b",
+        r"\bapoya los pies\b",
+        r"\bexhalacion\b",
+        r"\babre una nota con lo que te preocupa\b",
     )
 
     def curate(
@@ -263,20 +298,33 @@ class ResponseCurator:
             conversation_frame=conversation_frame,
         )
         if locked_support_flow_plan:
-            curated_text = self.humanize_without_overwriting(locked_support_flow_plan)
+            llm_text = ""
+            used_llm = False
+            if llm_result and not bool(llm_result.get("used_stub_fallback", False)):
+                raw_llm_text = self._extract_raw_text(llm_result)
+                llm_text = self._finalize_support_flow_text(
+                    text=raw_llm_text,
+                    support_flow_response_plan=locked_support_flow_plan,
+                )
+                used_llm = not self._support_flow_has_blocked_content(raw_llm_text, locked_support_flow_plan) and self._support_flow_llm_text_is_usable(
+                    text=llm_text,
+                    support_flow_response_plan=locked_support_flow_plan,
+                )
+            curated_text = llm_text if used_llm else self.humanize_without_overwriting(locked_support_flow_plan)
             route_id = str(locked_support_flow_plan.get("route_id") or "").strip()
             subroute_id = self._support_flow_subroute(locked_support_flow_plan)
             return {
                 "approved": True,
-                "quality_score": 0.97,
+                "quality_score": 0.97 if used_llm else 0.92,
                 "curated_response_text": curated_text,
                 "curated_response_structure": self._extract_structure(curated_text),
-                "source_provider": "local_support_locked_humanizer",
+                "source_provider": str(llm_result.get("provider") or "openai").strip() if used_llm else "local_support_locked_humanizer",
                 "used_stub_fallback": bool(llm_result.get("used_stub_fallback", False)),
-                "used_llm": False,
-                "used_local_humanizer": True,
+                "used_llm": used_llm,
+                "used_local_humanizer": not used_llm,
                 "should_learn_if_good": False,
                 "curation_notes": [
+                    "support_flow_humanization=llm_redaction" if used_llm else "support_flow_humanization=local_fallback",
                     "support_flow_lock=preserved",
                     f"route_id={route_id}" if route_id else "route_id=unknown",
                     f"selected_subroute={subroute_id}" if subroute_id else "selected_subroute=unknown",
@@ -371,37 +419,15 @@ class ResponseCurator:
         chat_history = chat_history or []
         llm_result = llm_result or {}
 
-        if support_flow_response_plan:
-            curated_text = self.humanize_without_overwriting(support_flow_response_plan)
-            route_id = str(support_flow_response_plan.get("route_id") or "").strip()
-            subroute_id = self._support_flow_subroute(support_flow_response_plan)
-            return {
-                "approved": True,
-                "quality_score": 0.97,
-                "curated_response_text": curated_text,
-                "curated_response_structure": self._extract_structure(curated_text),
-                "source_provider": "local_support_locked_humanizer",
-                "used_stub_fallback": bool(llm_result.get("used_stub_fallback", False)),
-                "used_llm": False,
-                "used_local_humanizer": True,
-                "should_learn_if_good": False,
-                "curation_notes": [
-                    "support_flow_humanization=locked_local_plan",
-                    f"route_id={route_id}" if route_id else "route_id=unknown",
-                    f"selected_subroute={subroute_id}" if subroute_id else "selected_subroute=unknown",
-                    "flow_engine_decides_what=curator_decides_how",
-                ],
-            }
-
         llm_text = ""
         used_llm = False
         if llm_result and not bool(llm_result.get("used_stub_fallback", False)):
-            llm_text = self._extract_raw_text(llm_result)
+            raw_llm_text = self._extract_raw_text(llm_result)
             llm_text = self._finalize_support_flow_text(
-                text=llm_text,
+                text=raw_llm_text,
                 support_flow_response_plan=support_flow_response_plan,
             )
-            if self._support_flow_llm_text_is_usable(
+            if not self._support_flow_has_blocked_content(raw_llm_text, support_flow_response_plan) and self._support_flow_llm_text_is_usable(
                 text=llm_text,
                 support_flow_response_plan=support_flow_response_plan,
             ):
@@ -410,7 +436,7 @@ class ResponseCurator:
         if used_llm:
             curated_text = llm_text
             source_provider = str(llm_result.get("provider") or "openai").strip() or "openai"
-            notes = ["support_flow_humanization=llm_redaction"]
+            notes = ["support_flow_humanization=llm_redaction", "support_flow_route_locked=true"]
             quality_score = 0.94
         else:
             curated_text = self._build_local_support_flow_text(
@@ -421,10 +447,19 @@ class ResponseCurator:
                 chat_history=chat_history,
             )
             source_provider = "local_support_humanizer"
-            notes = ["support_flow_humanization=local_fallback"]
+            notes = ["support_flow_humanization=local_fallback", "support_flow_route_locked=true"]
             if llm_result and bool(llm_result.get("used_stub_fallback", False)):
                 notes.append("support_flow_humanization=llm_stub_ignored")
             quality_score = 0.82
+
+        if support_flow_response_plan:
+            route_id = str(support_flow_response_plan.get("route_id") or "").strip()
+            subroute_id = self._support_flow_subroute(support_flow_response_plan)
+            if route_id:
+                notes.append(f"route_id={route_id}")
+            if subroute_id:
+                notes.append(f"selected_subroute={subroute_id}")
+            notes.append("flow_engine_decides_what=curator_decides_how")
 
         return {
             "approved": True,
@@ -507,6 +542,23 @@ class ResponseCurator:
         subroute_id = normalize_input(self._support_flow_subroute(plan))
         return route_id == "ansiedad" and subroute_id in self.GROUNDING_ALLOWED_SUBROUTES
 
+    def _support_flow_allows_sleep_note(self, plan: Dict[str, Any]) -> bool:
+        route_id = normalize_input(str(plan.get("route_id") or ""))
+        subroute_id = normalize_input(self._support_flow_subroute(plan))
+        tags = " ".join(normalize_input(str(tag)) for tag in (plan.get("tags") or []))
+        plan_text = normalize_input(
+            " ".join(
+                str(plan.get(key) or "")
+                for key in ("validation", "main_response", "optional_followup", "next_step", "literal_phrase")
+            )
+        )
+        return route_id == "sueno" and (
+            subroute_id in {"sleep mind racing", "sleep mente acelerada"}
+            or "mente acelerada" in tags
+            or "mind racing" in tags
+            or "mente acelerada" in plan_text
+        )
+
     def _support_flow_block_patterns(self, plan: Dict[str, Any]) -> List[str]:
         route_id = normalize_input(str(plan.get("route_id") or ""))
         patterns: List[str] = []
@@ -517,6 +569,12 @@ class ResponseCurator:
             patterns.extend(self.CRISIS_FORBIDDEN_PATTERNS)
         elif route_id == "sueno":
             patterns.extend(self.SLEEP_FORBIDDEN_PATTERNS)
+            if not self._support_flow_allows_sleep_note(plan):
+                patterns.extend(self.SLEEP_NOTE_FORBIDDEN_PATTERNS)
+        elif route_id == "bloqueo_ejecutivo":
+            patterns.extend(self.EXECUTIVE_FORBIDDEN_PATTERNS)
+        elif route_id == "apoyo_infancia_neurodivergente":
+            patterns.extend(self.CHILD_FORBIDDEN_PATTERNS)
         return patterns
 
     def _support_flow_has_blocked_content(self, text: str, plan: Dict[str, Any]) -> bool:
@@ -530,6 +588,8 @@ class ResponseCurator:
 
         patterns = self._support_flow_block_patterns(plan)
         if not patterns:
+            return cleaned
+        if not self._support_flow_has_blocked_content(cleaned, plan):
             return cleaned
 
         sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
@@ -557,6 +617,8 @@ class ResponseCurator:
             return "Ajusta una sola cosa del entorno: luz, ruido o pantalla."
         if route_id == "bloqueo_ejecutivo":
             return "Deja una sola acción visible y mínima."
+        if route_id == "apoyo_infancia_neurodivergente":
+            return "Céntrate en tu hija o hijo: una frase corta, menos estímulos y una preocupación a la vez."
         return str(plan.get("main_response") or plan.get("next_step") or "").strip()
 
     def _support_flow_llm_text_is_usable(
@@ -737,6 +799,8 @@ class ResponseCurator:
             ("accion", "acción"),
             ("Opcion", "Opción"),
             ("opcion", "opción"),
+            ("Opciónes", "Opciones"),
+            ("opciónes", "opciones"),
             ("Decision", "Decisión"),
             ("decision", "decisión"),
             ("Comunicacion", "Comunicación"),
@@ -747,6 +811,10 @@ class ResponseCurator:
             ("indicaciones", "indicaciones"),
             ("Preocupacion", "Preocupación"),
             ("preocupacion", "preocupación"),
+            ("Preocupaciónes", "Preocupaciones"),
+            ("preocupaciónes", "preocupaciones"),
+            ("Indicaciónes", "Indicaciones"),
+            ("indicaciónes", "indicaciones"),
             ("Frustracion", "Frustración"),
             ("frustracion", "frustración"),
             ("Situacion", "Situación"),
@@ -763,6 +831,8 @@ class ResponseCurator:
             ("ayudala", "ayúdala"),
             ("Ayudalo", "Ayúdalo"),
             ("ayudalo", "ayúdalo"),
+            ("Repitela", "Repítela"),
+            ("repitela", "repítela"),
             ("frio", "frío"),
             ("Mandibula", "Mandíbula"),
             ("mandibula", "mandíbula"),
@@ -775,6 +845,8 @@ class ResponseCurator:
             (r"\bmas\b", "más"),
             (r"\besta bien\b", "está bien"),
             (r"\bEsta bien\b", "Está bien"),
+            (r"\besta más\b", "está más"),
+            (r"\bEsta más\b", "Está más"),
             (r"\besta noche\b", "esta noche"),
             (r"\bmedida real\b", "medida real"),
             (r"\ben torno\b", "entorno"),
@@ -806,7 +878,7 @@ class ResponseCurator:
 
         fixed = re.sub(r'"([^"]*)"', lambda match: f'"{match.group(1).strip()}"', fixed)
         fixed = re.sub(r"\s+([,.;:])", r"\1", fixed)
-        fixed = re.sub(r"([,.;:])([^\s])", r"\1 \2", fixed)
+        fixed = re.sub(r"([,.;:])([^\s\"”])", r"\1 \2", fixed)
         fixed = re.sub(r"\s{2,}", " ", fixed)
         return fixed.strip()
 
@@ -1022,13 +1094,13 @@ class ResponseCurator:
             text = re.sub(pattern, "", text, flags=re.IGNORECASE)
 
         text = re.sub(r"\s+([,.;:])", r"\1", text)
-        text = re.sub(r"([,.;:])([^\s])", r"\1 \2", text)
+        text = re.sub(r"([,.;:])([^\s\"”])", r"\1 \2", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         text = re.sub(r"[ \t]{2,}", " ", text)
         text = re.sub(r"\.(\s*\.)+", ".", text)
         text = text.strip(" \n\t")
 
-        if text and not re.search(r"[.!?]$", text):
+        if text and not re.search(r"[.!?][\"”]?$", text):
             text += "."
 
         return text
