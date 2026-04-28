@@ -687,6 +687,15 @@ class ResponseCurator:
         if not is_deterministic_support_route(route_id):
             return ""
 
+        tags = {str(tag or "").strip() for tag in (support_flow_response_plan.get("tags") or [])}
+        if "domain_progression" in tags:
+            plan_text = str(support_flow_response_plan.get("main_response") or "").strip()
+            if plan_text:
+                return self._finalize_support_flow_text(
+                    text=plan_text,
+                    support_flow_response_plan=support_flow_response_plan,
+                )
+
         response_metadata = dict(response_package.get("response_metadata", {}) or {})
         support_state = dict(
             conversation_control.get("support_flow_state")

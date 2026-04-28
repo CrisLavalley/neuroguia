@@ -640,6 +640,82 @@ class SupportFlowEngine:
     }
     FOLLOWUP_EXIT_GOALS = {"close_temporarily", "decide_one_path", "switch_strategy"}
     FOLLOWUP_EXIT_THRESHOLD = 4
+    DOMAIN_PROGRESSIONS: Dict[Domain, List[str]] = {
+        "ansiedad": [
+            "anxiety_initial_grounding",
+            "anxiety_visible_action",
+            "anxiety_binary_decision",
+            "anxiety_hold_after_partial_relief",
+        ],
+        "crisis": [
+            "crisis_first_step",
+            "crisis_literal_phrase",
+            "crisis_environment_adjustment",
+            "crisis_close_temporarily",
+        ],
+        "sueno": [
+            "sleep_initial",
+            "sleep_environment",
+            "sleep_mind_racing",
+            "sleep_followup",
+        ],
+        "bloqueo_ejecutivo": [
+            "executive_initial",
+            "executive_visible_next_step",
+            "executive_expand_action",
+            "executive_close",
+        ],
+        "apoyo_infancia_neurodivergente": [
+            "child_initial_support",
+            "child_single_concern",
+            "child_co_regulation",
+            "child_close",
+        ],
+    }
+    PROGRESSION_SUBROUTE_ALIASES: Dict[Domain, Dict[str, str]] = {
+        "crisis": {
+            "crisis_initial": "crisis_first_step",
+            "crisis_demand_examples": "crisis_environment_adjustment",
+            "crisis_check_effect": "crisis_environment_adjustment",
+        },
+        "sueno": {
+            "sleep_insomnia": "sleep_environment",
+            "sleep_body_activated": "sleep_environment",
+        },
+        "bloqueo_ejecutivo": {
+            "executive_no_se_que_toca": "executive_visible_next_step",
+            "executive_linea_de_que": "executive_expand_action",
+            "executive_no_entiendo": "executive_visible_next_step",
+            "executive_no_puedo_empezar": "executive_visible_next_step",
+            "executive_decide_for_user": "executive_expand_action",
+        },
+        "apoyo_infancia_neurodivergente": {
+            "child_overthinking_support": "child_single_concern",
+            "child_saturation_support": "child_co_regulation",
+            "child_clear_communication": "child_co_regulation",
+            "child_reduce_stimuli": "child_co_regulation",
+            "child_anticipation_routines": "child_co_regulation",
+            "child_social_or_family_context": "child_co_regulation",
+        },
+    }
+    PROGRESSION_FOLLOWUP_FAMILIES = {
+        "followup_acceptance",
+        "post_action_followup",
+        "specific_action_request",
+    }
+    PROGRESSION_FOLLOWUP_MARKERS = [
+        "ok",
+        "y luego",
+        "que mas",
+        "que sigue",
+        "dime",
+        "ahora que hago",
+        "y ahora que hago",
+        "dime que hago",
+        "dime que sigue",
+        "y despues",
+        "despues",
+    ]
     NEXT_DISTINCT_SUBROUTES: Dict[Domain, List[str]] = {
         "crisis": [
             "crisis_literal_phrase",
@@ -831,6 +907,31 @@ class SupportFlowEngine:
                 route_id=route_id,
                 user_message=text,
                 recent_subroutes=recent_subroutes,
+            )
+            normalized_active_subroute = (
+                str(response_plan.state_subroute_id or response_plan.subroute_id or "").strip()
+                or active_subroute_id
+            )
+            if normalized_active_subroute and normalized_active_subroute != active_subroute_id:
+                active_subroute_id = normalized_active_subroute
+                recent_subroutes = self._resolve_recent_subroutes(
+                    previous_state=previous_state,
+                    route_id=route_id,
+                    active_subroute_id=active_subroute_id,
+                    previous_subroute=previous_subroute,
+                    continuity_score=continuity_score,
+                )
+            guidance_mode = self._resolve_guidance_mode(
+                turn_family=turn_family,
+                outcome=outcome,
+                response_plan=response_plan,
+            )
+            step_index = self._next_step_index(
+                previous_state=previous_state,
+                route_id=route_id,
+                guidance_mode=guidance_mode,
+                continuity_score=continuity_score,
+                max_steps=spec.max_steps if spec else 1,
             )
             action_state = self._resolve_action_state(
                 response_plan=response_plan,
@@ -1112,12 +1213,34 @@ class SupportFlowEngine:
         user_message: str,
         recent_subroutes: List[str],
     ) -> ResponsePlan:
-        deterministic_text = render_deterministic_support_response(
-            route_id=route_id,
-            subroute_id=response_plan.subroute_id or response_plan.state_subroute_id,
-            user_message=user_message,
-            recent_subroutes=recent_subroutes,
-        ).strip()
+        subroute_id = response_plan.subroute_id or response_plan.state_subroute_id
+        progression_subroute = None
+        if (
+            route_id in self.DOMAIN_PROGRESSIONS
+            and response_plan.goal not in {"safe_medication_boundary", "high_risk_redirect"}
+        ):
+            if (
+                route_id == "apoyo_infancia_neurodivergente"
+                and str(subroute_id or "").strip() == "child_co_regulation"
+                and len([item for item in recent_subroutes if str(item or "").strip()]) <= 1
+            ):
+                progression_subroute = "child_initial_support"
+            else:
+                progression_subroute = self._enforce_domain_progression_subroute(route_id, subroute_id)
+
+        deterministic_text = ""
+        if progression_subroute:
+            deterministic_text = self._domain_progression_response_text(
+                route_id=route_id,
+                subroute_id=progression_subroute,
+            ).strip()
+        if not deterministic_text:
+            deterministic_text = render_deterministic_support_response(
+                route_id=route_id,
+                subroute_id=subroute_id,
+                user_message=user_message,
+                recent_subroutes=recent_subroutes,
+            ).strip()
         if not deterministic_text:
             return response_plan
 
@@ -1133,6 +1256,8 @@ class SupportFlowEngine:
             literal_phrase=None,
             micro_practice=None,
             safety_note=None,
+            subroute_id=progression_subroute or response_plan.subroute_id,
+            state_subroute_id=progression_subroute or response_plan.state_subroute_id,
             humanization_required=False,
             tags=tags,
         )
@@ -1294,6 +1419,11 @@ class SupportFlowEngine:
 
         if turn_family == "meta_question":
             return "meta_question"
+        if (
+            effective_previous_route in self.DOMAIN_PROGRESSIONS
+            and self._is_progression_followup_text(normalized=normalized, turn_family=turn_family)
+        ):
+            return effective_previous_route
         if self._should_keep_crisis_domain(
             previous_route=effective_previous_route,
             normalized=normalized,
@@ -1618,6 +1748,18 @@ class SupportFlowEngine:
                 previous_frame=previous_frame,
                 action_memory=action_memory,
                 outcome=signal.outcome,
+            )
+
+        if self._should_advance_domain_progression(
+            route_id=route_id,
+            normalized=normalized,
+            turn_family=signal.turn_family,
+            previous_frame=previous_frame,
+        ):
+            return self._build_domain_progression_plan(
+                route_id=route_id,
+                previous_frame=previous_frame,
+                action_memory=action_memory,
             )
 
         if route_id == "bloqueo_ejecutivo" and self._contains_any(
@@ -2141,6 +2283,157 @@ class SupportFlowEngine:
             loop_cut=True,
         )
 
+    def get_next_subroute(self, current_subroute: Optional[str], route_id: Domain) -> Optional[str]:
+        progression = self.DOMAIN_PROGRESSIONS.get(route_id)
+        if not progression:
+            return current_subroute
+
+        normalized_current = str(current_subroute or "").strip()
+        normalized_current = self.PROGRESSION_SUBROUTE_ALIASES.get(route_id, {}).get(
+            normalized_current,
+            normalized_current,
+        )
+        if normalized_current not in progression:
+            return progression[0]
+
+        index = progression.index(normalized_current)
+        if index < len(progression) - 1:
+            return progression[index + 1]
+
+        return progression[-1]
+
+    def _is_progression_followup_text(self, normalized: str, turn_family: TurnFamily) -> bool:
+        if turn_family not in self.PROGRESSION_FOLLOWUP_FAMILIES:
+            return False
+        compact = self._compact_text(normalized)
+        if compact in self.CONFIRMATION_MARKERS:
+            return True
+        return self._contains_any(normalized, self.PROGRESSION_FOLLOWUP_MARKERS)
+
+    def _should_advance_domain_progression(
+        self,
+        route_id: Domain,
+        normalized: str,
+        turn_family: TurnFamily,
+        previous_frame: Dict[str, Any],
+    ) -> bool:
+        if route_id not in self.DOMAIN_PROGRESSIONS:
+            return False
+        if not self._has_recent_active_route(previous_frame):
+            return False
+        return self._is_progression_followup_text(normalized=normalized, turn_family=turn_family)
+
+    def _build_domain_progression_plan(
+        self,
+        route_id: Domain,
+        previous_frame: Dict[str, Any],
+        action_memory: Dict[str, Any],
+    ) -> ResponsePlan:
+        previous_state = dict(previous_frame.get("support_flow_state") or {})
+        current_subroute = (
+            self._current_subroute_from_state(previous_state)
+            or str(action_memory.get("active_subroute_id") or "").strip()
+            or None
+        )
+        next_subroute = self.get_next_subroute(current_subroute=current_subroute, route_id=route_id)
+        next_subroute = self._enforce_domain_progression_subroute(route_id, next_subroute)
+        return self._build_progression_subroute_plan(route_id=route_id, subroute_id=next_subroute)
+
+    def _enforce_domain_progression_subroute(
+        self,
+        route_id: Domain,
+        subroute_id: Optional[str],
+    ) -> str:
+        progression = self.DOMAIN_PROGRESSIONS.get(route_id) or []
+        fallback = progression[0] if progression else str(subroute_id or "").strip()
+        candidate = str(subroute_id or "").strip()
+        candidate = self.PROGRESSION_SUBROUTE_ALIASES.get(route_id, {}).get(candidate, candidate)
+        if not candidate:
+            return fallback
+        if candidate in progression:
+            return candidate
+
+        forbidden_prefixes = {
+            "ansiedad": ("crisis_", "sleep_", "executive_", "child_"),
+            "sueno": ("anxiety_", "crisis_", "executive_", "child_"),
+            "crisis": ("anxiety_", "sleep_", "executive_", "child_"),
+            "bloqueo_ejecutivo": ("anxiety_", "crisis_", "sleep_", "child_"),
+            "apoyo_infancia_neurodivergente": ("anxiety_", "crisis_", "sleep_", "executive_"),
+        }.get(route_id, ())
+        if forbidden_prefixes and candidate.startswith(forbidden_prefixes):
+            return fallback
+        return fallback
+
+    def _block_cross_domain_subroute(self, route_id: Domain, subroute_id: Optional[str]) -> str:
+        candidate = str(subroute_id or "").strip()
+        if not candidate:
+            return candidate
+        forbidden_prefixes = {
+            "ansiedad": ("crisis_", "sleep_", "executive_", "child_"),
+            "sueno": ("anxiety_", "crisis_", "executive_", "child_"),
+            "crisis": ("anxiety_", "sleep_", "executive_", "child_"),
+        }.get(route_id, ())
+        if forbidden_prefixes and candidate.startswith(forbidden_prefixes):
+            progression = self.DOMAIN_PROGRESSIONS.get(route_id) or []
+            return progression[0] if progression else candidate
+        return candidate
+
+    def _build_progression_subroute_plan(self, route_id: Domain, subroute_id: Optional[str]) -> ResponsePlan:
+        safe_subroute = self._enforce_domain_progression_subroute(route_id, subroute_id)
+        close_subroutes = {
+            "anxiety_hold_after_partial_relief",
+            "crisis_close_temporarily",
+            "sleep_followup",
+            "executive_close",
+            "child_close",
+        }
+        return self._make_engine_plan(
+            route_id=route_id,
+            subroute_id=safe_subroute,
+            goal="domain_progression_step",
+            tone="claro_directo",
+            validation="",
+            main_response=self._domain_progression_response_text(route_id, safe_subroute),
+            close_softly=safe_subroute in close_subroutes,
+            state_subroute_id=safe_subroute,
+            tags=["domain_progression", safe_subroute],
+        )
+
+    def _domain_progression_response_text(self, route_id: Domain, subroute_id: Optional[str]) -> str:
+        responses: Dict[Domain, Dict[str, str]] = {
+            "ansiedad": {
+                "anxiety_initial_grounding": "Estoy contigo. Primero baja una sola señal del cuerpo: apoya ambos pies y suelta el aire lento una vez.",
+                "anxiety_visible_action": "Ahora saca una preocupación de la cabeza: escribe una sola línea con lo que más pesa. No la resuelvas todavía.",
+                "anxiety_binary_decision": "Ahora ciérralo en una decisión simple: si requiere acción hoy, atiende solo eso; si no requiere acción hoy, queda quieto por ahora.",
+                "anxiety_hold_after_partial_relief": "Por ahora basta. No abras otra técnica ni otro frente; deja quieto lo demás y sostén lo que ya bajó.",
+            },
+            "crisis": {
+                "crisis_first_step": "Estoy contigo. Primero bajemos una sola demanda: ruido, preguntas, gente o luz. Solo una.",
+                "crisis_literal_phrase": "Ahora usa pocas palabras. Puedes decir: 'Estoy aquí. No tienes que explicar nada. Vamos a bajar esto.' Mantén distancia segura y no discutas.",
+                "crisis_environment_adjustment": "Ahora cambia una sola cosa del entorno: menos gente, menos ruido o más espacio físico. No agregues explicación ni debate.",
+                "crisis_close_temporarily": "Por ahora no agregues otra demanda. Sostén pocas palabras, distancia segura y el entorno lo más bajo posible.",
+            },
+            "sueno": {
+                "sleep_initial": "Sí, el sueño puede mover todo lo demás. Vamos a ubicar qué parte pesa más: mente acelerada, cuerpo activado o entorno.",
+                "sleep_environment": "Para esta noche: baja luz o pantalla durante 10 minutos. No intentes resolver todo el sueño de golpe.",
+                "sleep_mind_racing": "Si la mente sigue acelerada, escribe una sola preocupación en una nota y ciérrala. Solo una.",
+                "sleep_followup": "Por ahora basta con esa bajada. Mantén luz baja o pantalla fuera y no agregues otra medida esta noche.",
+            },
+            "bloqueo_ejecutivo": {
+                "executive_initial": "No empecemos por organizar todo. Elige una de estas tres: abrir el archivo, escribir el título o poner un temporizador de 2 minutos.",
+                "executive_visible_next_step": "Entonces lo hago más concreto: abre el archivo o cuaderno que tengas más cerca. No escribas nada todavía. Solo abrirlo.",
+                "executive_expand_action": "Ahora escribe solo el título o una primera frase fea. No tiene que quedar bien; solo tiene que existir.",
+                "executive_close": "Por ahora basta. Deja eso abierto o escrito y no intentes ordenar todo lo demás en este mismo paso.",
+            },
+            "apoyo_infancia_neurodivergente": {
+                "child_initial_support": "Claro. Aquí el foco son tus hijos: baja estímulos, usa frases cortas y saca una sola preocupación a papel o voz.",
+                "child_single_concern": "Pídele que elija una sola preocupación. Una. La escriben o la dicen en voz alta, y no abren las demás todavía.",
+                "child_co_regulation": "Ahora acompaña con presencia calmada, voz baja y una frase corta. No agregues varias explicaciones.",
+                "child_close": "Por ahora basta con una sola ayuda sostenida. Observa si baja un poco antes de meter otra indicación.",
+            },
+        }
+        return responses.get(route_id, {}).get(str(subroute_id or "").strip(), "")
+
     def _select_next_distinct_subroute(
         self,
         route_id: Domain,
@@ -2239,6 +2532,7 @@ class SupportFlowEngine:
         subroute_id: str,
         loop_cut: bool = False,
     ) -> ResponsePlan:
+        subroute_id = self._block_cross_domain_subroute(route_id, subroute_id)
         prefix = "Tienes razón. No repito eso. " if loop_cut else ""
         if route_id == "crisis":
             return self._build_crisis_distinct_plan(subroute_id=subroute_id, prefix=prefix)
