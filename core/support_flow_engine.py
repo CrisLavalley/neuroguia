@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from core.support_playbooks import (
@@ -15,6 +15,8 @@ from core.support_playbooks import (
     build_response_plan,
     get_playbook_spec,
     infer_basic_signal,
+    is_deterministic_support_route,
+    render_deterministic_support_response,
 )
 
 
@@ -334,6 +336,10 @@ class SupportFlowEngine:
         "eso ya me lo dijiste",
         "eso ya me lo dijiste antes",
         "me acabas de decir eso",
+        "sigues repitiendo",
+        "estas repitiendo",
+        "estás repitiendo",
+        "repites lo mismo",
     ]
     CRISIS_OTHER_REFERENCE_MARKERS = [
         "mi hijo",
@@ -422,14 +428,23 @@ class SupportFlowEngine:
         "sobre piensa",
         "sobrepiensa",
         "sobrepens",
+        "pensamientos intrusivos",
+        "pensamiento intrusivo",
+        "intrusivos",
+        "no pueden dormir",
         "ansiedad",
         "crisis",
         "saturada",
         "saturado",
         "no duerme",
+        "no duermen",
         "se altera",
         "se bloquea",
         "bloquea",
+        "aacc",
+        "altas capacidades",
+        "tea",
+        "tdah",
         "problema es",
         "la del problema",
         "el del problema",
@@ -442,6 +457,7 @@ class SupportFlowEngine:
         "ayudar a mi hija",
         "ayudar a mi hijo",
         "como ayudo a mis hijos",
+        "como ayudar a mis hijos",
         "como le ayudo",
         "como lo ayudo",
         "como la ayudo",
@@ -492,6 +508,10 @@ class SupportFlowEngine:
         "ansiedad": [
             "ahora estoy ansiosa",
             "ahora estoy ansioso",
+            "me siento ansiosa",
+            "me siento ansioso",
+            "estoy ansiosa",
+            "estoy ansioso",
             "esto me da ansiedad",
             "esto es ansiedad",
         ],
@@ -537,6 +557,10 @@ class SupportFlowEngine:
         ],
         "ansiedad": [
             "ansiedad",
+            "ansiosa",
+            "ansioso",
+            "me siento ansiosa",
+            "me siento ansioso",
             "me gana todo",
             "me gana",
             "todo se me junta",
@@ -801,6 +825,19 @@ class SupportFlowEngine:
             previous_subroute=previous_subroute,
             continuity_score=continuity_score,
         )
+        if response_plan and is_deterministic_support_route(route_id):
+            response_plan = self._apply_deterministic_demo_response_plan(
+                response_plan=response_plan,
+                route_id=route_id,
+                user_message=text,
+                recent_subroutes=recent_subroutes,
+            )
+            action_state = self._resolve_action_state(
+                response_plan=response_plan,
+                route_id=route_id,
+                conversation_domain=conversation_domain,
+                previous_action=action_memory,
+            )
         support_flow_state = {
             "active": handled,
             "handled_by": "support_flow_engine",
@@ -1067,6 +1104,38 @@ class SupportFlowEngine:
         if response_plan.optional_followup:
             parts.append(response_plan.optional_followup.strip())
         return " ".join(part for part in parts if part).strip()
+
+    def _apply_deterministic_demo_response_plan(
+        self,
+        response_plan: ResponsePlan,
+        route_id: Domain,
+        user_message: str,
+        recent_subroutes: List[str],
+    ) -> ResponsePlan:
+        deterministic_text = render_deterministic_support_response(
+            route_id=route_id,
+            subroute_id=response_plan.subroute_id or response_plan.state_subroute_id,
+            user_message=user_message,
+            recent_subroutes=recent_subroutes,
+        ).strip()
+        if not deterministic_text:
+            return response_plan
+
+        tags = list(response_plan.tags)
+        if "deterministic_demo" not in tags:
+            tags.append("deterministic_demo")
+        return replace(
+            response_plan,
+            validation="",
+            main_response=deterministic_text,
+            optional_followup=None,
+            next_step=None,
+            literal_phrase=None,
+            micro_practice=None,
+            safety_note=None,
+            humanization_required=False,
+            tags=tags,
+        )
 
     def _make_engine_plan(
         self,
@@ -2264,8 +2333,8 @@ class SupportFlowEngine:
                 goal="next_distinct_step",
                 tone="claro_directo",
                 validation="",
-                main_response=f"{prefix}Vuelve a una señal física mínima: pies firmes y una salida de aire larga.",
-                next_step="Pies firmes y una salida de aire larga",
+                main_response=f"{prefix}Vuelve a una señal física mínima: apoya ambos pies y suelta el aire lento una vez.",
+                next_step="Apoya ambos pies y suelta el aire lento una vez",
                 micro_practice="grounding_exhale",
                 tags=["next_step", "grounding"],
             )
@@ -2276,9 +2345,9 @@ class SupportFlowEngine:
                 goal="next_distinct_step",
                 tone="claro_directo",
                 validation="",
-                main_response=f"{prefix}Saca la ansiedad de la cabeza a una marca concreta: abre una nota y escribe una sola linea con la preocupacion principal.",
-                next_step="Escribe una sola linea con la preocupacion principal",
-                optional_followup="No la resuelvas todavia; solo sacala de la cabeza.",
+                main_response=f"{prefix}Pon la preocupación en una marca concreta: escribe una sola línea con lo que más pesa ahora.",
+                next_step="Escribe una sola línea con lo que más pesa ahora",
+                optional_followup="No la resuelvas todavía; solo déjala fuera de la cabeza.",
                 tags=["next_step", "visible_action"],
             )
         if subroute_id == "anxiety_binary_decision":

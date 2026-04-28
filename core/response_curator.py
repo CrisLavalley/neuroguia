@@ -5,6 +5,11 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional
 
+from core.support_playbooks import (
+    is_deterministic_support_route,
+    render_deterministic_support_response,
+)
+
 
 def normalize_input(text: Optional[str]) -> str:
     """Normaliza solo para matching interno; no debe usarse como salida visible."""
@@ -209,6 +214,13 @@ class ResponseCurator:
     )
 
     SUPPORT_FLOW_TEMPLATE_BLOCK_PATTERNS = (
+        r"\bsaca la ansiedad de la cabeza\b",
+        r"\bpies firmes y una salida de aire larga\b",
+        r"\bsi lo bajo mas\b",
+        r"\btoma solo el paso anterior\b",
+        r"\bla ansiedad se siente como demasiados frentes\b",
+        r"\btienes razon en marcarlo\b",
+        r"\bdime que parte concreta no se entendio\b",
         r"\bquedate con una sola cosa que baj[oa] la carga\b",
         r"\bdime el punto exacto que qued[oa] confuso\b",
         r"\bsi esto ya esta pesando mucho\b",
@@ -364,6 +376,34 @@ class ResponseCurator:
             conversation_frame=conversation_frame,
         )
         if locked_support_flow_plan:
+            deterministic_text = self._deterministic_locked_support_flow_text(
+                support_flow_response_plan=locked_support_flow_plan,
+                response_package=response_package,
+                conversation_control=conversation_control,
+                conversation_frame=conversation_frame,
+                chat_history=chat_history,
+            )
+            if deterministic_text:
+                route_id = str(locked_support_flow_plan.get("route_id") or "").strip()
+                subroute_id = self._support_flow_subroute(locked_support_flow_plan)
+                return {
+                    "approved": True,
+                    "quality_score": 0.99,
+                    "curated_response_text": deterministic_text,
+                    "curated_response_structure": self._extract_structure(deterministic_text),
+                    "source_provider": "local_support_deterministic",
+                    "used_stub_fallback": bool(llm_result.get("used_stub_fallback", False)),
+                    "used_llm": False,
+                    "used_local_humanizer": False,
+                    "should_learn_if_good": False,
+                    "curation_notes": [
+                        "support_flow_deterministic_demo=true",
+                        "support_flow_route_locked=true",
+                        "llm_blocked_for_deterministic_route=true",
+                        f"route_id={route_id}" if route_id else "route_id=unknown",
+                        f"selected_subroute={subroute_id}" if subroute_id else "selected_subroute=unknown",
+                    ],
+                }
             llm_text = ""
             used_llm = False
             if llm_result and not bool(llm_result.get("used_stub_fallback", False)):
@@ -485,6 +525,38 @@ class ResponseCurator:
         chat_history = chat_history or []
         llm_result = llm_result or {}
 
+        deterministic_text = self._deterministic_locked_support_flow_text(
+            support_flow_response_plan=support_flow_response_plan,
+            response_package=response_package,
+            conversation_control=conversation_control,
+            conversation_frame=conversation_frame,
+            chat_history=chat_history,
+        )
+        if deterministic_text:
+            notes = [
+                "support_flow_deterministic_demo=true",
+                "support_flow_route_locked=true",
+                "llm_blocked_for_deterministic_route=true",
+            ]
+            route_id = str(support_flow_response_plan.get("route_id") or "").strip()
+            subroute_id = self._support_flow_subroute(support_flow_response_plan)
+            if route_id:
+                notes.append(f"route_id={route_id}")
+            if subroute_id:
+                notes.append(f"selected_subroute={subroute_id}")
+            return {
+                "approved": True,
+                "quality_score": 0.99,
+                "curated_response_text": deterministic_text,
+                "curated_response_structure": self._extract_structure(deterministic_text),
+                "source_provider": "local_support_deterministic",
+                "used_stub_fallback": bool(llm_result.get("used_stub_fallback", False)),
+                "used_llm": False,
+                "used_local_humanizer": False,
+                "should_learn_if_good": False,
+                "curation_notes": notes,
+            }
+
         llm_text = ""
         used_llm = False
         if llm_result and not bool(llm_result.get("used_stub_fallback", False)):
@@ -602,6 +674,41 @@ class ResponseCurator:
             or plan.get("goal")
             or ""
         ).strip()
+
+    def _deterministic_locked_support_flow_text(
+        self,
+        support_flow_response_plan: Dict[str, Any],
+        response_package: Dict[str, Any],
+        conversation_control: Dict[str, Any],
+        conversation_frame: Dict[str, Any],
+        chat_history: List[Dict[str, Any]],
+    ) -> str:
+        route_id = str(support_flow_response_plan.get("route_id") or "").strip()
+        if not is_deterministic_support_route(route_id):
+            return ""
+
+        response_metadata = dict(response_package.get("response_metadata", {}) or {})
+        support_state = dict(
+            conversation_control.get("support_flow_state")
+            or conversation_frame.get("support_flow_state")
+            or response_metadata.get("support_flow_state")
+            or {}
+        )
+        recent_subroutes = list(support_state.get("recent_subroutes") or [])
+        subroute_id = self._support_flow_subroute(support_flow_response_plan)
+        user_message = self._current_user_message(conversation_control, chat_history)
+        deterministic_text = render_deterministic_support_response(
+            route_id=route_id,
+            subroute_id=subroute_id,
+            user_message=user_message,
+            recent_subroutes=recent_subroutes,
+        ).strip()
+        if not deterministic_text:
+            return ""
+        return self._finalize_support_flow_text(
+            text=deterministic_text,
+            support_flow_response_plan=support_flow_response_plan,
+        )
 
     def _support_flow_allows_grounding(self, plan: Dict[str, Any]) -> bool:
         route_id = normalize_input(str(plan.get("route_id") or ""))
@@ -1022,7 +1129,7 @@ class ResponseCurator:
         fixed = fixed.replace("Demásiada", "Demasiada")
         fixed = re.sub(r'"([^"]*)"', lambda match: f'"{match.group(1).strip()}"', fixed)
         fixed = re.sub(r"\s+([,.;:])", r"\1", fixed)
-        fixed = re.sub(r"([,.;:])([^\s\"”])", r"\1 \2", fixed)
+        fixed = re.sub(r"([,.;:])([^\s\"'”])", r"\1 \2", fixed)
         fixed = re.sub(r"\s{2,}", " ", fixed)
         return fixed.strip()
 
@@ -1238,7 +1345,7 @@ class ResponseCurator:
             text = re.sub(pattern, "", text, flags=re.IGNORECASE)
 
         text = re.sub(r"\s+([,.;:])", r"\1", text)
-        text = re.sub(r"([,.;:])([^\s\"”])", r"\1 \2", text)
+        text = re.sub(r"([,.;:])([^\s\"'”])", r"\1 \2", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         text = re.sub(r"[ \t]{2,}", " ", text)
         text = re.sub(r"\.(\s*\.)+", ".", text)

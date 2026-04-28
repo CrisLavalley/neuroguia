@@ -554,6 +554,317 @@ def _close_track(signal: UserSignal) -> str:
 
 
 # =========================================================
+# Modo demo estable / respuestas deterministicas
+# =========================================================
+
+DETERMINISTIC_SUPPORT_ROUTES = {
+    "crisis",
+    "ansiedad",
+    "sueno",
+    "bloqueo_ejecutivo",
+    "apoyo_infancia_neurodivergente",
+    "sobrecarga_cuidador",
+    "meta_question",
+    "meditacion_guiada",
+    "rechazo_estrategia",
+}
+
+
+def _canonical_route_id(route_id: Optional[str]) -> str:
+    return normalize_input(str(route_id or "")).replace(" ", "_")
+
+
+def _canonical_subroute_id(subroute_id: Optional[str]) -> str:
+    return normalize_input(str(subroute_id or "")).replace(" ", "_")
+
+
+def _canonical_recent_subroutes(recent_subroutes: Optional[Sequence[str]]) -> List[str]:
+    return [_canonical_subroute_id(item) for item in (recent_subroutes or []) if str(item or "").strip()]
+
+
+def _demo_has(normalized_text: str, phrases: Sequence[str]) -> bool:
+    return _has_any(normalized_text, phrases)
+
+
+def _demo_wants_next(normalized_text: str) -> bool:
+    return _demo_has(
+        normalized_text,
+        [
+            "ok",
+            "que sigue",
+            "que mas",
+            "que hago",
+            "dime que hago",
+            "dime que sigue",
+            "y luego",
+            "y ahora",
+            "dale",
+            "va",
+        ],
+    )
+
+
+def _demo_rejects_or_reports_repeat(normalized_text: str) -> bool:
+    return _demo_has(
+        normalized_text,
+        [
+            "eso no me funciona",
+            "no me funciona",
+            "no funciona",
+            "no me sirve",
+            "eso ya me lo dijiste",
+            "ya me lo dijiste",
+            "ya lo dijiste",
+            "sigues repitiendo",
+            "estas repitiendo",
+            "repites lo mismo",
+        ],
+    )
+
+
+def _demo_asks_for_meds(normalized_text: str) -> bool:
+    return _demo_has(normalized_text, MED_REQUEST_MARKERS)
+
+
+def is_deterministic_support_route(route_id: Optional[str]) -> bool:
+    return _canonical_route_id(route_id) in DETERMINISTIC_SUPPORT_ROUTES
+
+
+def render_crisis_response(
+    route_id: Optional[str],
+    subroute_id: Optional[str],
+    user_message: str,
+    recent_subroutes: Optional[Sequence[str]],
+) -> str:
+    route = _canonical_route_id(route_id)
+    subroute = _canonical_subroute_id(subroute_id)
+    text = normalize_input(user_message)
+    recent = _canonical_recent_subroutes(recent_subroutes)
+
+    if route != "crisis":
+        return ""
+    if _demo_rejects_or_reports_repeat(text):
+        return "Está bien, cambiamos. Si no bajó con palabras, cambia el entorno: menos gente, menos ruido o más espacio físico."
+    if subroute in {"crisis_first_step", "crisis_check_effect", "crisis_demand_examples"} and "crisis_literal_phrase" in recent:
+        return "Ahora cambia una sola cosa del entorno: menos gente, menos ruido o más espacio físico. No agregues explicación ni debate."
+    if subroute == "crisis_literal_phrase" or (
+        "crisis_initial" in recent and "crisis_literal_phrase" not in recent and _demo_wants_next(text)
+    ):
+        return "Ahora usa pocas palabras. Puedes decir: 'Estoy aquí. No tienes que explicar nada. Vamos a bajar esto.' Mantén distancia segura y no discutas."
+    if subroute == "crisis_close_temporarily":
+        return "Por ahora no agregues otra demanda. Sostén pocas palabras, distancia segura y el entorno lo más bajo posible."
+    return "Estoy contigo. Primero bajemos una sola demanda: ruido, preguntas, gente o luz. Solo una."
+
+
+def render_sleep_response(
+    route_id: Optional[str],
+    subroute_id: Optional[str],
+    user_message: str,
+    recent_subroutes: Optional[Sequence[str]],
+) -> str:
+    route = _canonical_route_id(route_id)
+    subroute = _canonical_subroute_id(subroute_id)
+    text = normalize_input(user_message)
+    recent = _canonical_recent_subroutes(recent_subroutes)
+
+    if route != "sueno":
+        return ""
+    if _demo_asks_for_meds(text) or subroute == "sleep_medication_boundary":
+        return "No puedo decirte qué medicamento tomar ni recomendar dosis. Si el sueño está afectando mucho, lo más seguro es consultarlo con un profesional de salud. Sí puedo ayudarte con una medida no farmacológica para esta noche."
+    if _demo_rejects_or_reports_repeat(text):
+        return "Está bien, cambiamos. Para esta noche, deja solo una bajada: menos luz o menos pantalla durante 10 minutos."
+    if subroute == "sleep_followup" or (_demo_wants_next(text) and recent):
+        return "Para esta noche: baja luz o pantalla durante 10 minutos. Si la mente sigue acelerada, escribe una sola preocupación en una nota y ciérrala."
+    if subroute == "sleep_mind_racing":
+        return "Si la mente va rápido, no intentes resolver todo en la cama. Escribe una sola preocupación y cierra la nota."
+    if subroute == "sleep_body_activated":
+        return "Si el cuerpo está activado, no fuerces dormir todavía. Baja luz, afloja mandíbula y deja el cuerpo quieto unos minutos."
+    if subroute == "sleep_environment":
+        return "Ajusta una sola cosa del entorno: luz, ruido, pantalla o temperatura. Solo una."
+    return "Sí, el sueño puede mover todo lo demás. Vamos a ubicar qué parte pesa más: mente acelerada, cuerpo activado o entorno."
+
+
+def render_executive_response(
+    route_id: Optional[str],
+    subroute_id: Optional[str],
+    user_message: str,
+    recent_subroutes: Optional[Sequence[str]],
+) -> str:
+    route = _canonical_route_id(route_id)
+    subroute = _canonical_subroute_id(subroute_id)
+    text = normalize_input(user_message)
+    recent = _canonical_recent_subroutes(recent_subroutes)
+
+    if route != "bloqueo_ejecutivo":
+        return ""
+    if _demo_rejects_or_reports_repeat(text):
+        return "Tienes razón. No repito eso. Cambio de vía: te doy una acción distinta y concreta. Pon un temporizador de 2 minutos y abre el archivo."
+    if _demo_has(text, ["no se como", "no entiendo", "como lo hago"]) or subroute in {"executive_no_entiendo", "executive_no_puedo_empezar"}:
+        return "Entonces lo hago más concreto: abre el archivo o cuaderno que tengas más cerca. No escribas nada todavía. Solo abrirlo."
+    if subroute in {"executive_visible_next_step", "executive_no_se_que_toca", "executive_linea_de_que"} or (_demo_wants_next(text) and recent):
+        return "Ahora escribe solo el título o una primera frase fea. No tiene que quedar bien; solo tiene que existir."
+    return "No empecemos por organizar todo. Elige una de estas tres: abrir el archivo, escribir el título o poner un temporizador de 2 minutos."
+
+
+def render_anxiety_response(
+    route_id: Optional[str],
+    subroute_id: Optional[str],
+    user_message: str,
+    recent_subroutes: Optional[Sequence[str]],
+) -> str:
+    route = _canonical_route_id(route_id)
+    subroute = _canonical_subroute_id(subroute_id)
+    text = normalize_input(user_message)
+    recent = _canonical_recent_subroutes(recent_subroutes)
+
+    if route != "ansiedad":
+        return ""
+    if _demo_rejects_or_reports_repeat(text):
+        return "Tienes razón. No repito eso. Cambio de vía: escribe solo lo que sí vence hoy y deja quieto lo que puede esperar."
+    if subroute in {"anxiety_visible_action", "anxiety_change_modality"} or (_demo_wants_next(text) and recent):
+        return "Ahora saca una preocupación de la cabeza: escribe una sola línea con lo que más pesa. No la resuelvas todavía."
+    if subroute == "anxiety_binary_decision":
+        return "Ahora ciérralo en una decisión simple: si vence hoy, atiende solo eso; si no vence hoy, queda quieto por ahora."
+    return "Estoy contigo. Primero baja una sola señal del cuerpo: apoya ambos pies y suelta el aire lento una vez."
+
+
+def render_child_support_response(
+    route_id: Optional[str],
+    subroute_id: Optional[str],
+    user_message: str,
+    recent_subroutes: Optional[Sequence[str]],
+) -> str:
+    route = _canonical_route_id(route_id)
+    subroute = _canonical_subroute_id(subroute_id)
+    text = normalize_input(user_message)
+    recent = _canonical_recent_subroutes(recent_subroutes)
+
+    if route != "apoyo_infancia_neurodivergente":
+        return ""
+    if _demo_rejects_or_reports_repeat(text):
+        return "Tienes razón. No repito eso. Cambio de vía: vuelve al foco de tu hija o hijo con una sola ayuda concreta."
+    if _demo_has(text, ["sobrepiensa", "sobrepensar", "sobrepensamiento"]) or subroute == "child_overthinking_support":
+        return "Cuando sobrepiensa, suele ayudar más bajar velocidad que explicar más. Pídele que elija una sola preocupación. Una. La escriben o la dicen en voz alta, y no abren las demás todavía."
+    if subroute == "child_clear_communication":
+        return "Usa una frase corta y repetible: 'solo una preocupación ahora; las demás no las abrimos todavía'."
+    if subroute == "child_reduce_stimuli":
+        return "Para tus hijos, baja un estímulo concreto: menos luz, menos ruido, menos pantalla o menos gente cerca. Solo uno."
+    if _demo_wants_next(text) and recent:
+        return "Sigue dentro del mismo foco: menos estímulos, frases cortas y una sola preocupación afuera de la cabeza."
+    return "Claro. Aquí el foco son tus hijos. Para esta noche, no intentaría convencerlos con muchas explicaciones. Haría tres cosas: bajar estímulos, usar frases cortas y sacar una sola preocupación a papel o voz. Por ejemplo: 'solo vamos a escribir una preocupación y luego descansamos'."
+
+
+def render_caregiver_response(
+    route_id: Optional[str],
+    subroute_id: Optional[str],
+    user_message: str,
+    recent_subroutes: Optional[Sequence[str]],
+) -> str:
+    route = _canonical_route_id(route_id)
+    subroute = _canonical_subroute_id(subroute_id)
+    text = normalize_input(user_message)
+    recent = _canonical_recent_subroutes(recent_subroutes)
+
+    if route != "sobrecarga_cuidador":
+        return ""
+    if _demo_rejects_or_reports_repeat(text):
+        return "Tienes razón. No repito eso. Cambio de vía: baja una sola carga concreta que pueda esperar."
+    if subroute == "caregiver_ask_for_help":
+        return "Pide una ayuda cerrada, no ayuda en general: una hora, una tarea o una decisión concreta."
+    if subroute == "caregiver_self_care_without_guilt":
+        return "Haz una pausa mínima sin culpa: agua, baño, sentarte cinco minutos o respirar fuera."
+    if subroute == "caregiver_single_priority" or (_demo_wants_next(text) and recent):
+        return "Cierra una sola prioridad para hoy: seguridad, descanso o lo que vence hoy. Solo una."
+    return "Esto es mucho para sostenerlo sola/o. Baja una sola carga ahora: una tarea que pueda esperar, una petición concreta o una pausa mínima."
+
+
+def render_meta_response(
+    route_id: Optional[str],
+    subroute_id: Optional[str],
+    user_message: str,
+    recent_subroutes: Optional[Sequence[str]],
+) -> str:
+    route = _canonical_route_id(route_id)
+    subroute = _canonical_subroute_id(subroute_id)
+    text = normalize_input(user_message)
+    _ = _canonical_recent_subroutes(recent_subroutes)
+
+    if route != "meta_question":
+        return ""
+    if subroute == "how_can_i_call_you" or _demo_has(text, ["como puedo llamarte", "como te llamo", "tu nombre"]):
+        return "Puedes llamarme NeuroGuIA."
+    if subroute == "can_i_talk_to_you" or _demo_has(text, ["puedo hablar contigo", "puedo platicar contigo"]):
+        return "Sí. Puedes hablar conmigo aquí; te respondo con pasos claros y cuidado."
+    if subroute == "what_can_you_do" or _demo_has(text, ["que puedes hacer", "como ayudas", "que haces"]):
+        return "Puedo ayudarte con crisis, ansiedad, sueño, bloqueo, apoyo a hijas/os neurodivergentes y sobrecarga de cuidado, con pasos breves."
+    return "Soy NeuroGuIA. Estoy aquí para acompañar, ordenar lo que pasa y ayudarte a encontrar un paso claro."
+
+
+def render_meditation_response(
+    route_id: Optional[str],
+    subroute_id: Optional[str],
+    user_message: str,
+    recent_subroutes: Optional[Sequence[str]],
+) -> str:
+    route = _canonical_route_id(route_id)
+    subroute = _canonical_subroute_id(subroute_id)
+    _ = normalize_input(user_message)
+    _recent = _canonical_recent_subroutes(recent_subroutes)
+
+    if route != "meditacion_guiada":
+        return ""
+    if subroute == "one_minute_breath":
+        return "Hagamos un minuto: inhala normal, suelta el aire lento y deja bajar los hombros. Repite tres veces."
+    if subroute == "grounding_5_senses":
+        return "Aterriza con cinco sentidos: nombra cinco cosas que ves, cuatro que tocas, tres que oyes, dos que hueles y una que saboreas o recuerdas."
+    return "Haz una pausa breve conmigo: baja hombros, nota tres cosas que ves y suelta el aire una vez."
+
+
+def render_rejection_response(
+    route_id: Optional[str],
+    subroute_id: Optional[str],
+    user_message: str,
+    recent_subroutes: Optional[Sequence[str]],
+) -> str:
+    route = _canonical_route_id(route_id)
+    _ = _canonical_subroute_id(subroute_id)
+    _text = normalize_input(user_message)
+    _recent = _canonical_recent_subroutes(recent_subroutes)
+
+    if route != "rechazo_estrategia":
+        return ""
+    return "Tienes razón. No repito eso. Cambio de vía: te doy una acción distinta y concreta."
+
+
+def render_deterministic_support_response(
+    route_id: Optional[str],
+    subroute_id: Optional[str],
+    user_message: str,
+    recent_subroutes: Optional[Sequence[str]] = None,
+) -> str:
+    route = _canonical_route_id(route_id)
+    if route == "crisis":
+        return render_crisis_response(route_id, subroute_id, user_message, recent_subroutes)
+    if route == "ansiedad":
+        return render_anxiety_response(route_id, subroute_id, user_message, recent_subroutes)
+    if route == "sueno":
+        return render_sleep_response(route_id, subroute_id, user_message, recent_subroutes)
+    if route == "bloqueo_ejecutivo":
+        return render_executive_response(route_id, subroute_id, user_message, recent_subroutes)
+    if route == "apoyo_infancia_neurodivergente":
+        return render_child_support_response(route_id, subroute_id, user_message, recent_subroutes)
+    if route == "sobrecarga_cuidador":
+        return render_caregiver_response(route_id, subroute_id, user_message, recent_subroutes)
+    if route == "meta_question":
+        return render_meta_response(route_id, subroute_id, user_message, recent_subroutes)
+    if route == "meditacion_guiada":
+        return render_meditation_response(route_id, subroute_id, user_message, recent_subroutes)
+    if route == "rechazo_estrategia":
+        return render_rejection_response(route_id, subroute_id, user_message, recent_subroutes)
+    return ""
+
+
+# =========================================================
 # Playbooks especificos
 # =========================================================
 
@@ -784,8 +1095,8 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
             goal="clarify_anxiety_step",
             tone="claro_calido",
             validation="Si, te lo digo directo.",
-            main_response="Si la ansiedad está encima, baja primero una señal del cuerpo: pies firmes y una salida de aire larga.",
-            next_step="Pies firmes y una salida de aire larga",
+            main_response="Si la ansiedad está encima, baja primero una señal del cuerpo: apoya ambos pies y suelta el aire lento una vez.",
+            next_step="Apoya ambos pies y suelta el aire lento una vez",
             micro_practice="grounding_exhale",
             tags=["ansiedad", "grounding"],
         )
@@ -797,8 +1108,8 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
             goal="reduce_anxiety_now",
             tone="calido_contenedor",
             validation="Si la ansiedad ya se desbordó, no la resolvemos pensando más fuerte.",
-            main_response="Primero baja una señal del cuerpo: pies firmes y una salida de aire larga.",
-            next_step="Pies firmes y una salida de aire larga",
+            main_response="Primero baja una señal del cuerpo: apoya ambos pies y suelta el aire lento una vez.",
+            next_step="Apoya ambos pies y suelta el aire lento una vez",
             micro_practice="grounding_exhale",
             optional_followup="Cuando baje un poco, sacamos una preocupación concreta de la cabeza.",
             tags=["ansiedad", "grounding"],
@@ -873,9 +1184,9 @@ def playbook_anxiety(signal: UserSignal) -> ResponsePlan:
         subroute_id="anxiety_initial_grounding",
         goal="initial_anxiety_support",
         tone="calido_contenedor",
-        validation="La ansiedad se siente como demasiados frentes abiertos a la vez.",
-        main_response="No abras otro frente. Baja primero una señal del cuerpo: pies firmes y una salida de aire larga.",
-        next_step="Pies firmes y una salida de aire larga",
+        validation="La ansiedad puede abrir demasiados frentes a la vez.",
+        main_response="No abras otro frente. Baja primero una señal del cuerpo: apoya ambos pies y suelta el aire lento una vez.",
+        next_step="Apoya ambos pies y suelta el aire lento una vez",
         micro_practice="grounding_exhale",
         optional_followup="Después vemos si hace falta una acción visible o una decisión corta.",
         tags=["ansiedad", "inicio"],
@@ -1531,8 +1842,8 @@ def playbook_clarification(signal: UserSignal) -> ResponsePlan:
         subroute_id="i_dont_understand",
         goal="clarify_in_one_step",
         tone="claro_calido",
-        validation="Sí, lo bajo más.",
-        main_response="Toma solo el paso anterior y dime qué parte concreta no se entendió: la frase, el inicio o el siguiente movimiento.",
+        validation="Voy más concreto.",
+        main_response="Toma solo el paso anterior: la frase, el inicio o el siguiente movimiento. Uno.",
         tags=["clarification"],
     )
 
@@ -1555,8 +1866,8 @@ def playbook_strategy_rejection(signal: UserSignal) -> ResponsePlan:
         subroute_id="strategy_switch",
         goal="change_strategy_without_pressure",
         tone="calido_claro",
-        validation="Tienes razón en marcarlo.",
-        main_response="Tienes razón. No repito eso. Vamos con un paso distinto y más concreto.",
+        validation="Tienes razón.",
+        main_response="No repito eso. Cambio de vía: te doy una acción distinta y concreta.",
         optional_followup="Si no puedes elegir, tomo el paso más simple y seguimos desde ahí.",
         tags=["strategy_rejection", "change_path"],
     )

@@ -7,6 +7,8 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional
 
+from core.support_playbooks import is_deterministic_support_route
+
 try:
     from openai import OpenAI
 except ImportError:
@@ -89,6 +91,14 @@ class LLMGateway:
             or decision_payload.get("support_flow_response_plan")
             or {}
         )
+        if support_flow_response_plan and is_deterministic_support_route(
+            support_flow_response_plan.get("route_id")
+        ):
+            return {
+                "allowed": False,
+                "reason": "deterministic_support_route_llm_blocked",
+                "request_payload": None,
+            }
         response_goal = decision_payload.get("response_goal", {}) or {}
         constraints = fallback_payload.get("constraints", {}) or {}
 
