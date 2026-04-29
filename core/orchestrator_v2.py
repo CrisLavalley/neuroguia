@@ -28,6 +28,425 @@ from memory.profile_manager import ProfileManager
 from memory.user_context_memory import UserContextMemory
 
 
+STABLE_DEMO_STEPS: Dict[str, List[str]] = {
+    "ansiedad": [
+        "Estoy contigo. Primero baja una señal del cuerpo: apoya ambos pies y suelta el aire lento una vez.",
+        "Ahora saca una preocupación de la cabeza: escribe una sola línea con lo que más pesa. No la resuelvas todavía.",
+        "Ahora decide solo esto: ¿esa preocupación necesita acción hoy o puede esperar?",
+        "Por ahora quédate con una cosa: si necesita acción hoy, haz solo el primer paso; si puede esperar, déjala fuera por ahora.",
+    ],
+    "crisis": [
+        "Estoy contigo. Primero bajemos una sola demanda: ruido, preguntas, gente o luz. Solo una.",
+        "Ahora usa pocas palabras. Puedes decir: 'Estoy aquí. No tienes que explicar nada. Vamos a bajar esto.'",
+        "Mantén distancia segura y no discutas. Si no baja, cambia una sola cosa del entorno: menos gente, menos ruido o más espacio.",
+        "Por ahora sostén seguridad y baja demanda. No agregues más instrucciones.",
+    ],
+    "sueno": [
+        "Sí, el sueño puede mover todo lo demás. Vamos a ubicar qué pesa más: mente acelerada, cuerpo activado o entorno.",
+        "Para esta noche: baja luz o pantalla durante 10 minutos.",
+        "Si la mente sigue acelerada, escribe una sola preocupación en una nota y ciérrala. No resuelvas todo.",
+        "Si el cuerpo sigue activo, no pelees con dormir: baja ritmo, afloja hombros y vuelve a intentar sin pantalla.",
+    ],
+    "bloqueo_ejecutivo": [
+        "No empecemos por organizar todo. Elige una: abrir archivo, escribir título o temporizador de 2 minutos.",
+        "Si no sabes cuál elegir, empieza por abrir el archivo o cuaderno que tengas más cerca. Nada más.",
+        "Ahora escribe solo el título o una primera frase fea. No tiene que quedar bien.",
+        "Ahora pon un temporizador de 2 minutos y haz solo el primer movimiento.",
+    ],
+    "apoyo_infancia_neurodivergente": [
+        "Claro. Me centro en tus hijos. Si están sobrepensando, no conviene meter más explicaciones. Ayuda más bajar velocidad.",
+        "Pídeles sacar una sola preocupación, en voz o en papel. Una sola.",
+        "Usa frases cortas: 'solo una preocupación ahora', 'no tenemos que resolverlas todas hoy'.",
+        "Después baja estímulos: menos luz, menos ruido, menos preguntas. Si hay AACC, TEA o TDAH, la anticipación y la rutina visual pueden ayudar.",
+    ],
+}
+
+STABLE_DEMO_ROUTE_TO_DOMAIN: Dict[str, str] = {
+    "crisis": "crisis_activa",
+    "ansiedad": "ansiedad_cognitiva",
+    "sueno": "sueno_regulacion",
+    "bloqueo_ejecutivo": "disfuncion_ejecutiva",
+    "apoyo_infancia_neurodivergente": "apoyo_infancia_neurodivergente",
+    "medicacion": "apoyo_general",
+    "meta": "apoyo_general",
+}
+
+STABLE_DEMO_DOMAIN_TO_ROUTE: Dict[str, str] = {
+    value: key for key, value in STABLE_DEMO_ROUTE_TO_DOMAIN.items()
+}
+
+STABLE_DEMO_GOALS: Dict[str, str] = {
+    "crisis": "contain_and_protect",
+    "ansiedad": "reduce_mental_overload",
+    "sueno": "stabilize_sleep_transition",
+    "bloqueo_ejecutivo": "enable_first_step",
+    "apoyo_infancia_neurodivergente": "support_neurodivergent_child",
+    "medicacion": "safe_medication_boundary",
+    "meta": "answer_directly",
+}
+
+STABLE_DEMO_PHASES: Dict[str, str] = {
+    "crisis": "stable_demo_crisis",
+    "ansiedad": "stable_demo_ansiedad",
+    "sueno": "stable_demo_sueno",
+    "bloqueo_ejecutivo": "stable_demo_bloqueo",
+    "apoyo_infancia_neurodivergente": "stable_demo_infancia",
+    "medicacion": "stable_demo_medicacion",
+    "meta": "stable_demo_meta",
+}
+
+
+def _stable_demo_normalize(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(text or "").strip().lower())
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    return " ".join(normalized.split())
+
+
+def _stable_demo_has(normalized: str, phrases: List[str]) -> bool:
+    return any(_stable_demo_normalize(phrase) in normalized for phrase in phrases)
+
+
+def _stable_demo_previous_route(previous_frame: Optional[Dict[str, Any]]) -> Optional[str]:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    candidates = [
+        frame.get("stable_demo_route_id"),
+        frame.get("route_id"),
+        support_state.get("route_id"),
+        support_state.get("active_route_id"),
+        frame.get("active_route_id"),
+        STABLE_DEMO_DOMAIN_TO_ROUTE.get(str(frame.get("conversation_domain") or "").strip()),
+    ]
+    for candidate in candidates:
+        route = str(candidate or "").strip()
+        if route in STABLE_DEMO_ROUTE_TO_DOMAIN:
+            return route
+    return None
+
+
+def _stable_demo_previous_step(previous_frame: Optional[Dict[str, Any]]) -> int:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    for key_source, key in [
+        (frame, "stable_demo_step_index"),
+        (frame, "step_index"),
+        (support_state, "step_index"),
+    ]:
+        try:
+            return max(int(key_source.get(key, 0) or 0), 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _stable_demo_detect_route(message: str, previous_frame: Optional[Dict[str, Any]]) -> Optional[str]:
+    normalized = _stable_demo_normalize(message)
+    previous_route = _stable_demo_previous_route(previous_frame)
+    previous_pre_medication_route = str((previous_frame or {}).get("pre_medication_route_id") or "").strip()
+
+    non_pharmacological = _stable_demo_has(
+        normalized,
+        [
+            "medida no farmacologica",
+            "no farmacologico",
+            "no farmacologica",
+            "sin medicamento",
+            "sin pastilla",
+            "sin farmaco",
+        ],
+    )
+    asks_medication = _stable_demo_has(
+        normalized,
+        [
+            "medicamento",
+            "medicamentos",
+            "medicina",
+            "pastilla",
+            "pastillas",
+            "dosis",
+            "que tomo",
+            "que me tomo",
+            "que pastilla",
+            "que le doy",
+            "recetame",
+            "algo para dormir",
+            "algo para calmarme",
+            "algo para la ansiedad",
+        ],
+    )
+    if asks_medication and not non_pharmacological:
+        return "medicacion"
+    if non_pharmacological and previous_pre_medication_route in STABLE_DEMO_STEPS:
+        return previous_pre_medication_route
+
+    if _stable_demo_has(
+        normalized,
+        [
+            "quien eres",
+            "quien sos",
+            "como te llamo",
+            "como puedo llamarte",
+            "tu nombre",
+            "que puedes hacer",
+            "para que sirves",
+            "puedo hablar contigo",
+            "puedo platicar contigo",
+        ],
+    ):
+        return "meta"
+
+    if _stable_demo_has(normalized, ["no es ansiedad es sueno", "no es ansiedad es sue o", "no es ansiedad es dormir", "el problema es dormir", "el problema es sueno", "el problema es sue o"]):
+        return "sueno"
+    if _stable_demo_has(normalized, ["no es crisis es ansiedad", "no es sueno es ansiedad", "el problema es ansiedad"]):
+        return "ansiedad"
+    if _stable_demo_has(normalized, ["no es ansiedad es crisis", "hay crisis", "esta ocurriendo una crisis"]):
+        return "crisis"
+    if _stable_demo_has(
+        normalized,
+        [
+            "el problema es mi hija",
+            "el problema es mi hijo",
+            "el problema son mis hijos",
+            "el problema son mis hijas",
+            "no soy yo es mi hija",
+            "no soy yo es mi hijo",
+            "no es mio es mi hija",
+            "no es mio es mi hijo",
+        ],
+    ):
+        return "apoyo_infancia_neurodivergente"
+
+    if _stable_demo_has(
+        normalized,
+        [
+            "crisis",
+            "se esta golpeando",
+            "esta gritando",
+            "esta golpeando",
+            "no lo puedo calmar",
+            "no la puedo calmar",
+            "hay riesgo",
+            "meltdown",
+        ],
+    ):
+        return "crisis"
+    if _stable_demo_has(
+        normalized,
+        [
+            "mi hijo",
+            "mi hija",
+            "mis hijos",
+            "mis hijas",
+            "mi nino",
+            "mi nina",
+            "mi niño",
+            "mi niña",
+            "triple excepcionalidad",
+            "doble excepcionalidad",
+            "altas capacidades",
+            "aacc",
+            "tea",
+            "tdah",
+            "sobrepensamiento",
+            "sobrepiensa",
+        ],
+    ):
+        return "apoyo_infancia_neurodivergente"
+    if _stable_demo_has(
+        normalized,
+        [
+            "sueno",
+            "sue o",
+            "dormir",
+            "duermo",
+            "duerme",
+            "insomnio",
+            "desvelo",
+            "no descanso",
+            "problemas de sueno",
+            "problemas de sue o",
+        ],
+    ):
+        return "sueno"
+    if _stable_demo_has(
+        normalized,
+        [
+            "bloqueo",
+            "bloqueada",
+            "bloqueado",
+            "no puedo organizarme",
+            "organizarme",
+            "no puedo empezar",
+            "me cuesta arrancar",
+            "abrir archivo",
+            "temporizador",
+            "tarea",
+        ],
+    ):
+        return "bloqueo_ejecutivo"
+    if _stable_demo_has(
+        normalized,
+        [
+            "ansiedad",
+            "ansiosa",
+            "ansioso",
+            "me siento ansiosa",
+            "me siento ansioso",
+            "preocupacion",
+            "preocupa",
+            "mente acelerada",
+        ],
+    ):
+        return "ansiedad"
+    if previous_route in STABLE_DEMO_ROUTE_TO_DOMAIN:
+        return previous_route
+    return None
+
+
+def _stable_demo_turn_family(message: str, previous_route: Optional[str], route_id: str) -> str:
+    normalized = _stable_demo_normalize(message)
+    if route_id == "meta":
+        return "meta_question"
+    if route_id == "medicacion":
+        return "specific_action_request"
+    if previous_route and previous_route != route_id:
+        return "domain_shift"
+    if _stable_demo_has(normalized, ["ya lo hice", "listo", "hecho"]):
+        return "post_action_followup"
+    if _stable_demo_has(normalized, ["eso ya me lo dijiste", "eso ya lo dijiste", "repites", "estas repitiendo", "estás repitiendo"]):
+        return "post_action_followup"
+    if _stable_demo_has(normalized, ["que sigue", "ahora que", "y luego", "que mas", "dime que hago", "que hago", "dime una medida", "pero dime"]):
+        return "followup_acceptance"
+    if previous_route == route_id:
+        return "followup_acceptance"
+    return "new_request"
+
+
+def stable_demo_response(
+    message: str,
+    previous_frame: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    route_id = _stable_demo_detect_route(message, previous_frame)
+    if route_id not in STABLE_DEMO_ROUTE_TO_DOMAIN:
+        return {"handled": False}
+
+    normalized = _stable_demo_normalize(message)
+    previous_route = _stable_demo_previous_route(previous_frame)
+    previous_step = _stable_demo_previous_step(previous_frame)
+    turn_family = _stable_demo_turn_family(message, previous_route, route_id)
+
+    if route_id == "medicacion":
+        response_text = (
+            "No puedo decirte qué medicamento tomar ni recomendar dosis. "
+            "Si el sueño o la ansiedad están afectando mucho, lo más seguro es consultarlo con un profesional de salud. "
+            "Sí puedo ayudarte con una medida no farmacológica."
+        )
+        step_index = 0
+    elif route_id == "meta":
+        response_text = "Soy NeuroGuIA. Estoy aquí para acompañar, ordenar lo que pasa y ayudarte a encontrar un paso claro."
+        if _stable_demo_has(normalized, ["como puedo llamarte", "como te llamo", "tu nombre"]):
+            response_text = "Puedes llamarme NeuroGuIA."
+        elif _stable_demo_has(normalized, ["que puedes hacer", "para que sirves"]):
+            response_text = "Puedo ayudarte a ordenar lo que está pasando y darte un siguiente paso claro, breve y seguro."
+        elif _stable_demo_has(normalized, ["puedo hablar contigo", "puedo platicar contigo"]):
+            response_text = "Sí. Puedes hablar conmigo aquí; te respondo con pasos claros y cuidado."
+        step_index = 0
+    else:
+        steps = STABLE_DEMO_STEPS[route_id]
+        max_step = len(steps) - 1
+        same_route = previous_route == route_id
+        repeats_previous = _stable_demo_has(
+            normalized,
+            [
+                "eso ya me lo dijiste",
+                "eso ya lo dijiste",
+                "ya me lo dijiste",
+                "repites",
+                "estas repitiendo",
+                "estás repitiendo",
+            ],
+        )
+        if same_route or turn_family in {"followup_acceptance", "post_action_followup"}:
+            step_index = min(previous_step + 1, max_step)
+        else:
+            step_index = 0
+
+        response_text = steps[step_index]
+        if repeats_previous:
+            response_text = f"Tienes razón. No repito eso. Vamos al siguiente paso: {response_text}"
+
+    conversation_domain = STABLE_DEMO_ROUTE_TO_DOMAIN[route_id]
+    support_goal = STABLE_DEMO_GOALS.get(route_id, "clarify_and_support")
+    conversation_phase = STABLE_DEMO_PHASES.get(route_id, "stable_demo")
+    max_steps = len(STABLE_DEMO_STEPS.get(route_id, [""])) or 1
+    pre_medication_route_id = None
+    pre_medication_step_index = None
+    if route_id == "medicacion":
+        detected_context_route = None
+        if _stable_demo_has(normalized, ["dormir", "sueno", "insomnio", "desvelo"]):
+            detected_context_route = "sueno"
+        elif _stable_demo_has(normalized, ["ansiedad", "ansiosa", "ansioso", "calmarme"]):
+            detected_context_route = "ansiedad"
+        pre_medication_route_id = previous_route if previous_route in STABLE_DEMO_STEPS else detected_context_route
+        pre_medication_step_index = previous_step if pre_medication_route_id == previous_route else 0
+
+    conversation_frame = {
+        "conversation_domain": conversation_domain,
+        "support_goal": support_goal,
+        "conversation_phase": conversation_phase,
+        "speaker_role": (previous_frame or {}).get("speaker_role") or "usuario",
+        "care_context": {
+            "stable_demo": True,
+            "previous_route_id": previous_route,
+            "previous_step_index": previous_step,
+        },
+        "continuity_score": 0.96 if previous_route == route_id else 0.62,
+        "source_message": message,
+        "effective_message": message,
+        "turn_type": turn_family,
+        "turn_family": turn_family,
+        "route_id": route_id,
+        "stable_demo_route_id": route_id,
+        "step_index": step_index,
+        "stable_demo_step_index": step_index,
+        "max_steps": max_steps,
+        "stable_demo": True,
+        "phase_progression_reason": "stable_demo_counter",
+        "last_guided_action": response_text,
+        "last_action_instruction": response_text,
+        "last_action_type": "stable_demo_step",
+        "intervention_level": 1,
+        "domain_shift_detected": bool(previous_route and previous_route != route_id),
+        "domain_shift_analysis": {
+            "detected": bool(previous_route and previous_route != route_id),
+            "previous_route_id": previous_route,
+            "route_id": route_id,
+        },
+        "support_flow_state": {
+            "active": False,
+            "handled_by": "stable_demo_response",
+            "route_id": route_id,
+            "active_route_id": route_id if route_id in STABLE_DEMO_STEPS else None,
+            "conversation_domain": conversation_domain,
+            "step_index": step_index,
+            "max_steps": max_steps,
+        },
+    }
+    if pre_medication_route_id:
+        conversation_frame["pre_medication_route_id"] = pre_medication_route_id
+        conversation_frame["pre_medication_step_index"] = pre_medication_step_index
+
+    return {
+        "handled": True,
+        "response_text": response_text,
+        "route_id": route_id,
+        "step_index": step_index,
+        "turn_family": turn_family,
+        "conversation_frame": conversation_frame,
+    }
+
+
 class NeuroGuiaOrchestratorV2:
     """
     Orquestador principal de NeuroGuIA.
@@ -239,6 +658,24 @@ class NeuroGuiaOrchestratorV2:
             previous_frame=previous_frame,
         )
         effective_message = context_override.get("effective_message") or message
+        stable_demo = stable_demo_response(
+            message=message,
+            previous_frame=previous_frame,
+        )
+        if stable_demo.get("handled"):
+            return self._build_stable_demo_process_result(
+                stable_demo=stable_demo,
+                message=message,
+                effective_message=effective_message,
+                previous_frame=previous_frame,
+                context_override=context_override,
+                unit_context=unit_context,
+                user_context_payload=user_context_payload,
+                user_context_store_result=user_context_store_result,
+                conversation_curation_result=conversation_curation_result,
+                session_scope_id=session_scope_id,
+                chat_history_size=len(chat_history or []),
+            )
 
         # -----------------------------------------------------
         # 1) PERFIL ACTIVO
@@ -346,10 +783,18 @@ class NeuroGuiaOrchestratorV2:
             intent_analysis=intent_analysis,
             chat_history=chat_history,
         )
-        if flow_result.handled:
-            return self.support_flow_engine.build_orchestrator_payloads(flow_result)
-
-        support_flow_payloads = {}
+        support_flow_payloads = (
+            self.support_flow_engine.build_orchestrator_payloads(flow_result)
+            if flow_result.handled
+            else {}
+        )
+        if support_flow_payloads:
+            conversation_control.update(
+                support_flow_payloads.get("conversation_control_updates", {}) or {}
+            )
+            conversation_frame.update(
+                support_flow_payloads.get("conversation_frame_updates", {}) or {}
+            )
 
         effective_family_id = family_id or (active_profile.get("family_id") if active_profile else None)
         effective_profile_id = active_profile.get("profile_id") if active_profile else None
@@ -384,6 +829,7 @@ class NeuroGuiaOrchestratorV2:
             "care_context": conversation_frame.get("care_context"),
             "conversation_frame": conversation_frame,
             "conversation_control": conversation_control,
+            "support_flow_response_plan": support_flow_payloads.get("support_flow_response_plan", {}),
             "domain_shift_detected": conversation_frame.get("domain_shift_detected", False),
             "is_followup_acceptance": conversation_control.get("turn_type") == "followup_acceptance",
             "context_override": context_override,
@@ -653,10 +1099,9 @@ class NeuroGuiaOrchestratorV2:
         llm_curated_payload = None
         llm_should_run = False
 
-        if not support_flow_payloads:
-            llm_should_run = bool(
-                fallback_payload.get("use_llm") or llm_policy.get("should_use_llm")
-            )
+        llm_should_run = bool(
+            fallback_payload.get("use_llm") or llm_policy.get("should_use_llm")
+        )
 
         if llm_should_run:
             llm_request_payload = self.llm_gateway.build_request(
@@ -691,7 +1136,9 @@ class NeuroGuiaOrchestratorV2:
             )
 
             if llm_request_payload.get("allowed"):
-                if use_llm_stub:
+                if support_flow_payloads and use_llm_stub:
+                    llm_result = None
+                elif use_llm_stub:
                     llm_result = self.llm_gateway.build_local_stub_response(
                         llm_request_payload.get("request_payload") or {}
                     )
@@ -705,30 +1152,55 @@ class NeuroGuiaOrchestratorV2:
                             llm_request_payload.get("request_payload") or {}
                         )
 
-                llm_curated_payload = self.response_curator.curate(
-                    llm_result=llm_result,
-                    fallback_payload={
-                        **fallback_payload,
-                        "use_llm": True,
-                        "fallback_reason": llm_policy.get("reason") or fallback_payload.get("fallback_reason"),
-                        "should_learn_if_good": fallback_payload.get("should_learn_if_good", False),
-                    },
-                    decision_payload=decision_payload,
-                    stage_result=stage_result,
-                    state_analysis=state_analysis,
-                    category_analysis=category_analysis,
-                    intent_analysis=intent_analysis,
-                    routine_payload=routine_payload,
-                    conversation_control=conversation_control,
-                    conversation_frame=conversation_frame,
-                    chat_history=chat_history,
-                )
+                if not support_flow_payloads and llm_result is not None:
+                    llm_curated_payload = self.response_curator.curate(
+                        llm_result=llm_result,
+                        fallback_payload={
+                            **fallback_payload,
+                            "use_llm": True,
+                            "fallback_reason": llm_policy.get("reason") or fallback_payload.get("fallback_reason"),
+                            "should_learn_if_good": fallback_payload.get("should_learn_if_good", False),
+                        },
+                        decision_payload=decision_payload,
+                        stage_result=stage_result,
+                        state_analysis=state_analysis,
+                        category_analysis=category_analysis,
+                        intent_analysis=intent_analysis,
+                        routine_payload=routine_payload,
+                        conversation_control=conversation_control,
+                        conversation_frame=conversation_frame,
+                        chat_history=chat_history,
+                    )
 
         # -----------------------------------------------------
         # 15) RESPUESTA FINAL
         # -----------------------------------------------------
         if support_flow_payloads:
             response_package = dict(support_flow_payloads.get("response_package", {}))
+            llm_curated_payload = self.response_curator.humanize_support_flow_response(
+                response_package=response_package,
+                support_flow_response_plan=support_flow_payloads.get("support_flow_response_plan", {}),
+                llm_result=llm_result,
+                conversation_control=conversation_control,
+                conversation_frame=conversation_frame,
+                chat_history=chat_history,
+            )
+            humanized_text = str(llm_curated_payload.get("curated_response_text") or "").strip()
+            if humanized_text:
+                response_package["response"] = humanized_text
+                response_package["text"] = humanized_text
+            response_metadata = dict(response_package.get("response_metadata", {}) or {})
+            response_metadata.update(
+                {
+                    "humanization_provider": llm_curated_payload.get("source_provider"),
+                    "humanization_used_llm": bool(llm_curated_payload.get("used_llm", False)),
+                    "humanization_used_local_humanizer": bool(
+                        llm_curated_payload.get("used_local_humanizer", False)
+                    ),
+                    "humanization_notes": list(llm_curated_payload.get("curation_notes", []) or []),
+                }
+            )
+            response_package["response_metadata"] = response_metadata
         else:
             rb_input = self._build_response_builder_input(
                 decision_payload=decision_payload,
@@ -1014,6 +1486,203 @@ class NeuroGuiaOrchestratorV2:
             "conversation_curation_result": conversation_curation_result,
             "session_scope_id": session_scope_id,
             "response_package": response_package,
+        }
+
+    def _build_stable_demo_process_result(
+        self,
+        stable_demo: Dict[str, Any],
+        message: str,
+        effective_message: str,
+        previous_frame: Dict[str, Any],
+        context_override: Dict[str, Any],
+        unit_context: Dict[str, Any],
+        user_context_payload: Dict[str, Any],
+        user_context_store_result: Dict[str, Any],
+        conversation_curation_result: Dict[str, Any],
+        session_scope_id: Optional[str],
+        chat_history_size: int = 0,
+    ) -> Dict[str, Any]:
+        response_text = str(stable_demo.get("response_text") or "").strip()
+        route_id = str(stable_demo.get("route_id") or "").strip()
+        step_index = int(stable_demo.get("step_index", 0) or 0)
+        conversation_frame = dict(stable_demo.get("conversation_frame") or {})
+        conversation_frame["context_override"] = dict(
+            context_override
+            or self._empty_context_override(
+                message=message,
+                effective_message=effective_message,
+            )
+        )
+        conversation_frame["effective_message"] = effective_message
+        conversation_frame = self._normalize_conversation_frame(conversation_frame)
+        conversation_frame["route_id"] = route_id
+        conversation_frame["stable_demo_route_id"] = route_id
+        conversation_frame["step_index"] = step_index
+        conversation_frame["stable_demo_step_index"] = step_index
+        conversation_frame["stable_demo"] = True
+
+        conversation_control = {
+            "domain": conversation_frame.get("conversation_domain"),
+            "route_id": route_id,
+            "stable_demo_route_id": route_id,
+            "step_index": step_index,
+            "stable_demo": True,
+            "turn_type": conversation_frame.get("turn_type") or stable_demo.get("turn_family"),
+            "turn_family": conversation_frame.get("turn_family") or stable_demo.get("turn_family"),
+            "phase": conversation_frame.get("conversation_phase"),
+            "speaker_role": conversation_frame.get("speaker_role"),
+            "source_message": message,
+            "effective_message": effective_message,
+            "chat_history_size": chat_history_size,
+            "context_override": conversation_frame.get("context_override"),
+            "intervention_level": conversation_frame.get("intervention_level", 1),
+            "last_guided_action": response_text,
+            "last_action_instruction": response_text,
+            "last_action_type": "stable_demo_step",
+            "phase_progression_reason": "stable_demo_counter",
+            "domain_shift": conversation_frame.get("domain_shift_analysis", {}),
+        }
+
+        stage_result = {
+            "stage": "stable_demo",
+            "conversation_domain": conversation_frame.get("conversation_domain"),
+            "conversation_phase": conversation_frame.get("conversation_phase"),
+            "route_id": route_id,
+            "step_index": step_index,
+            "turn_type": conversation_control.get("turn_type"),
+            "turn_family": conversation_control.get("turn_family"),
+            "intervention_level": 1,
+            "phase_progression_reason": "stable_demo_counter",
+            "should_close_with_followup": False,
+        }
+        response_goal = {
+            "goal": STABLE_DEMO_GOALS.get(route_id, "stable_demo_support"),
+            "route_id": route_id,
+            "step_index": step_index,
+            "response_shape": "direct_deterministic_step",
+            "intervention_level": 1,
+            "strategy_signature": f"stable_demo:{route_id}:{step_index}",
+            "selected_microaction": response_text,
+        }
+        decision_payload = {
+            "decision_mode": "stable_demo",
+            "selected_strategy": route_id,
+            "selected_microaction": response_text,
+            "selected_routine_type": None,
+            "response_goal": response_goal,
+            "response_plan": dict(response_goal),
+        }
+        response_package = {
+            "mode": "system_generated",
+            "response": response_text,
+            "text": response_text,
+            "suggested_microaction": response_text,
+            "route_id": route_id,
+            "step_index": step_index,
+            "stable_demo": True,
+            "response_metadata": {
+                "source": "stable_demo_response",
+                "route_id": route_id,
+                "step_index": step_index,
+                "used_llm": False,
+                "used_curator": False,
+                "bypassed_support_flow_engine": True,
+                "bypassed_response_curator": True,
+                "bypassed_fallback": True,
+            },
+        }
+        category_analysis = {
+            "detected_category": conversation_frame.get("conversation_domain"),
+            "confidence": 1.0,
+            "route_id": route_id,
+            "source": "stable_demo_response",
+        }
+        state_analysis = {
+            "primary_state": route_id,
+            "secondary_states": [],
+            "detected_states": [],
+            "followup_needed": False,
+            "source": "stable_demo_response",
+        }
+        intent_analysis = {
+            "detected_intent": conversation_control.get("turn_family") or "stable_demo",
+            "confidence": 1.0,
+            "source": "stable_demo_response",
+        }
+        confidence_payload = {
+            "overall_confidence": 1.0,
+            "source": "stable_demo_response",
+        }
+        fallback_payload = {
+            "use_llm": False,
+            "fallback_reason": "stable_demo_bypass",
+            "should_learn_if_good": False,
+        }
+        llm_policy = {
+            "should_use_llm": False,
+            "reason": "stable_demo_bypass",
+        }
+        conversational_intent = {
+            "intent": "stable_demo_direct_response",
+            "route_id": route_id,
+            "step_index": step_index,
+        }
+        support_plan = self._empty_support_plan()
+        exceptionality_analysis = self._empty_exceptionality_analysis()
+        user_context_payload = {
+            **(user_context_payload or {}),
+            "available": False,
+            "reason": "stable_demo_bypass",
+            "session_scope_id": session_scope_id,
+        }
+        user_context_store_result = {
+            **(user_context_store_result or {}),
+            "stored": False,
+            "reason": "stable_demo_bypass",
+        }
+        conversation_curation_result = {
+            **(conversation_curation_result or {}),
+            "stored": False,
+            "reason": "stable_demo_bypass",
+            "curation_id": None,
+        }
+
+        return {
+            "case_id": None,
+            "stored_response_id": None,
+            "curated_llm_response_id": None,
+            "learning_payload": None,
+            "learning_store_result": None,
+            "unit_context": unit_context,
+            "active_profile": None,
+            "exceptionality_analysis": exceptionality_analysis,
+            "support_plan": support_plan,
+            "conversation_control": conversation_control,
+            "conversation_frame": conversation_frame,
+            "conversational_intent": conversational_intent,
+            "expert_adaptation_plan": {},
+            "state_analysis": state_analysis,
+            "category_analysis": category_analysis,
+            "intent_analysis": intent_analysis,
+            "memory_summary": {},
+            "memory_payload": {},
+            "user_context_payload": user_context_payload,
+            "user_context_store_result": user_context_store_result,
+            "response_memory_payload": {},
+            "stage_result": stage_result,
+            "stage_hints": {},
+            "routine_payload": {},
+            "confidence_payload": confidence_payload,
+            "decision_payload": decision_payload,
+            "fallback_payload": fallback_payload,
+            "llm_policy": llm_policy,
+            "llm_request_payload": {"allowed": False, "reason": "stable_demo_bypass"},
+            "llm_result": None,
+            "llm_curated_payload": None,
+            "conversation_curation_result": conversation_curation_result,
+            "session_scope_id": session_scope_id,
+            "response_package": response_package,
+            "previous_frame": previous_frame,
         }
 
     # =========================================================

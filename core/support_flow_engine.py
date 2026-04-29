@@ -640,64 +640,11 @@ class SupportFlowEngine:
     }
     FOLLOWUP_EXIT_GOALS = {"close_temporarily", "decide_one_path", "switch_strategy"}
     FOLLOWUP_EXIT_THRESHOLD = 4
-    DOMAIN_PROGRESSIONS: Dict[Domain, List[str]] = {
-        "ansiedad": [
-            "anxiety_initial_grounding",
-            "anxiety_visible_action",
-            "anxiety_binary_decision",
-            "anxiety_hold_after_partial_relief",
-        ],
-        "crisis": [
-            "crisis_first_step",
-            "crisis_literal_phrase",
-            "crisis_environment_adjustment",
-            "crisis_close_temporarily",
-        ],
-        "sueno": [
-            "sleep_initial",
-            "sleep_environment",
-            "sleep_mind_racing",
-            "sleep_followup",
-        ],
-        "bloqueo_ejecutivo": [
-            "executive_initial",
-            "executive_visible_next_step",
-            "executive_expand_action",
-            "executive_close",
-        ],
-        "apoyo_infancia_neurodivergente": [
-            "child_initial_support",
-            "child_single_concern",
-            "child_co_regulation",
-            "child_close",
-        ],
-    }
-    PROGRESSION_SUBROUTE_ALIASES: Dict[Domain, Dict[str, str]] = {
-        "crisis": {
-            "crisis_initial": "crisis_first_step",
-            "crisis_demand_examples": "crisis_environment_adjustment",
-            "crisis_check_effect": "crisis_environment_adjustment",
-        },
-        "sueno": {
-            "sleep_insomnia": "sleep_environment",
-            "sleep_body_activated": "sleep_environment",
-        },
-        "bloqueo_ejecutivo": {
-            "executive_no_se_que_toca": "executive_visible_next_step",
-            "executive_linea_de_que": "executive_expand_action",
-            "executive_no_entiendo": "executive_visible_next_step",
-            "executive_no_puedo_empezar": "executive_visible_next_step",
-            "executive_decide_for_user": "executive_expand_action",
-        },
-        "apoyo_infancia_neurodivergente": {
-            "child_overthinking_support": "child_single_concern",
-            "child_saturation_support": "child_co_regulation",
-            "child_clear_communication": "child_co_regulation",
-            "child_reduce_stimuli": "child_co_regulation",
-            "child_anticipation_routines": "child_co_regulation",
-            "child_social_or_family_context": "child_co_regulation",
-        },
-    }
+    # Disabled: stable demo mode now owns covered-domain progression before this
+    # engine runs. Keeping this empty prevents old subroute progressions from
+    # crossing ansiedad/crisis/sueno/bloqueo/infancia domains.
+    DOMAIN_PROGRESSIONS: Dict[Domain, List[str]] = {}
+    PROGRESSION_SUBROUTE_ALIASES: Dict[Domain, Dict[str, str]] = {}
     PROGRESSION_FOLLOWUP_FAMILIES = {
         "followup_acceptance",
         "post_action_followup",
