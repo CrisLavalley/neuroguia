@@ -206,6 +206,55 @@ PLAYBOOK_CATALOG: Dict[Domain, Tuple[str, ...]] = {
 }
 
 
+INTERVENTION_BANK: Dict[str, Dict[str, str]] = {
+    "ansiedad": {
+        "grounding_pies": "Estoy contigo. Primero baja una señal del cuerpo: apoya ambos pies y suelta el aire lento una vez.",
+        "respiracion_1_min": "Vamos con una respiración sencilla: inhala normal, exhala más lento. No busques hacerlo perfecto. Hazlo tres veces, como si bajaras el volumen interno.",
+        "grounding_54321": "Mira alrededor: nombra 5 cosas que ves, 4 que sientes, 3 que oyes, 2 que hueles y 1 cosa que puedes saborear o imaginar. No expliques nada, solo nómbralas.",
+        "descarga_mental": "Saca una preocupación de la cabeza: escribe una sola línea con lo que más pesa. No la resuelvas todavía.",
+        "decision_hoy_no_hoy": "Ahora decide solo esto: ¿esa preocupación necesita acción hoy o puede esperar? Si necesita acción hoy, haz solo el primer paso; si puede esperar, déjala fuera por ahora.",
+        "meditacion_1_minuto": "Vamos a meditar un minuto. No tienes que dejar la mente en blanco. Solo nota el aire entrar y salir. Si aparece un pensamiento, di por dentro: 'ahí está', y vuelve al aire.",
+        "meditacion_ansiedad": "Haz una meditación muy breve para ansiedad: nota los pies, suelta el aire lento y repite por dentro: 'ahora solo una cosa'. Quédate ahí tres respiraciones.",
+    },
+    "crisis": {
+        "bajar_estimulos": "Estoy contigo. Primero bajemos una sola demanda: ruido, preguntas, gente o luz. Solo una.",
+        "frase_literal": "Ahora usa pocas palabras. Puedes decir: 'Estoy aquí. No tienes que explicar nada. Vamos a bajar esto.'",
+        "distancia_segura": "Mantén distancia segura y no invadas el espacio. Quédate cerca, pero sin arrinconar ni tocar si eso aumenta la crisis.",
+        "no_discutir": "No discutas ni intentes convencer ahora. En crisis, menos palabras suele ayudar más: una frase corta, pausa y entorno más bajo.",
+        "crisis_hijo_coregulacion": "Si es tu hijo o hija, primero baja tú el ritmo: voz lenta, cuerpo tranquilo y pocas palabras. No necesita una explicación larga, necesita seguridad.",
+        "seguridad_entorno": "Mira el entorno: retira objetos que puedan lastimar, baja gente alrededor y deja una salida clara. Seguridad primero, explicación después.",
+    },
+    "sueno": {
+        "rutina_bajada": "Haz una bajada de 10 minutos: baja luz, aleja pantalla y evita conversaciones exigentes. El objetivo no es dormir a la fuerza, es avisarle al cuerpo que ya puede bajar.",
+        "mente_acelerada": "Si la mente no se apaga, no pelees con ella. Escribe una sola preocupación en una nota y cierra la nota. La idea no es resolverla, es sacarla de la cama.",
+        "cuerpo_activado": "Si el cuerpo sigue activo, no pelees con dormir: afloja hombros, mandíbula y manos. Respira más lento tres veces y vuelve a intentar sin pantalla.",
+        "entorno": "Cambia una sola cosa del entorno: menos luz, menos ruido, temperatura más cómoda o pantalla lejos. Solo una, para no activar más la cabeza.",
+        "pensamientos_intrusivos": "Si aparecen pensamientos intrusivos, trátalos como ruido mental, no como tareas. Di por dentro: 'es un pensamiento, no una orden', y vuelve a una sensación física simple.",
+        "si_no_puede_dormir": "Si no puedes dormir, sal de la pelea con dormir. Quédate en poca luz, sin pantalla, con algo monótono y vuelve a la cama cuando baje un poco la activación.",
+        "meditacion_sueno": "Vamos con una meditación para dormir: nota el peso del cuerpo, afloja la cara y sigue el aire sin obligarte a dormir. Si aparece un pensamiento, lo dejas pasar y vuelves al peso del cuerpo.",
+        "limite_medicacion": "No puedo decirte qué medicamento tomar ni recomendar dosis. Si el sueño o la ansiedad están afectando mucho, lo más seguro es consultarlo con un profesional de salud.",
+    },
+    "bloqueo_ejecutivo": {
+        "abrir_material": "Si no sabes por dónde empezar, empieza por abrir el archivo, cuaderno o material que tengas más cerca. Nada más.",
+        "tres_opciones": "Te doy tres entradas: abrir el archivo, escribir el título o poner temporizador de 2 minutos. Si no puedes elegir, empieza por abrir el archivo.",
+        "temporizador": "Pon un temporizador de 2 minutos y haz solo el primer movimiento. Cuando suene, puedes parar o seguir, pero no negocies antes de empezar.",
+        "titulo_feo": "Escribe solo el título o una primera frase fea. No tiene que quedar bien; tiene que existir.",
+        "primer_movimiento": "Elige el movimiento más físico y pequeño: abrir, copiar una línea, poner fecha o escribir una palabra. Solo eso cuenta como empezar.",
+        "si_no_sabe_que_toca": "Si no sabes qué toca, no intentes ordenar todo. Mira solo qué vence primero o qué está más a la mano, y abre eso.",
+        "reducir_friccion": "Quita una fricción: deja visible el material, acerca el cargador, abre la pestaña o despeja un espacio mínimo. Preparar el inicio también cuenta.",
+    },
+    "apoyo_infancia_neurodivergente": {
+        "sobrepensamiento": "Cuando sobrepiensa, no conviene darle muchas explicaciones. Ayúdale a sacar una sola preocupación. Una. La escriben o la dicen en voz alta y no abren las demás todavía.",
+        "corregulacion": "Primero baja tú el ritmo: voz más lenta, pocas palabras y cuerpo tranquilo. Muchas veces no necesita una explicación perfecta, necesita sentir que alguien sostiene el momento.",
+        "comunicacion_concreta": "Usa frases cortas y concretas: 'solo una preocupación ahora', 'no tenemos que resolverlas todas hoy', 'primero bajamos el cuerpo'.",
+        "rutina_visual": "Hazlo visible: dibuja o escribe tres pasos máximos. Primero bajar estímulos, luego una preocupación, después descanso. Que pueda verlo sin sostenerlo todo en la cabeza.",
+        "reduccion_sensorial": "Baja estímulos antes de explicar: menos luz, menos ruido, menos preguntas y menos gente hablando a la vez. El sistema nervioso necesita menos entrada.",
+        "pensamientos_intrusivos": "Si hay pensamientos intrusivos, no los discutan uno por uno. Pueden decir: 'es un pensamiento molesto, no una instrucción', y volver a una acción segura y concreta.",
+        "sueno_infancia": "Para ayudarles a dormir, baja anticipación y estímulos: misma secuencia breve, luz baja, pantalla fuera y una frase repetible como 'ahora solo toca descansar'.",
+    },
+}
+
+
 def get_catalog_subroutes(route_id: Domain) -> Tuple[str, ...]:
     return PLAYBOOK_CATALOG.get(route_id, ())
 
