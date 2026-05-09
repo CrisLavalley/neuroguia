@@ -1,14 +1,28 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import json
 import os
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional
+
+from core.support_playbooks import is_deterministic_support_route
 
 try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
+
+
+def normalize_input(text: Optional[str]) -> str:
+    """Normaliza solo para matching interno; la salida visible conserva acentos."""
+
+    normalized = " ".join((text or "").strip().lower().split())
+    normalized = unicodedata.normalize("NFKD", normalized)
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    return " ".join(normalized.split())
 
 
 class LLMGateway:
@@ -21,7 +35,9 @@ class LLMGateway:
         "controlled_reflective_feedback",
         "controlled_adaptive_support",
         "controlled_calm_support",
-    }
+            "support_flow_humanization",
+            "stable_demo_behavioral_writer",
+        }
 
     DEFAULT_OPENAI_MODEL = "gpt-5-mini"
     DEFAULT_TIMEOUT_SECONDS = 20.0
@@ -71,6 +87,19 @@ class LLMGateway:
         conversational_intent = case_context.get("conversational_intent", {}) or {}
         user_context_memory = case_context.get("user_context_memory", {}) or {}
         expert_adaptation_plan = case_context.get("expert_adaptation_plan", {}) or {}
+        support_flow_response_plan = (
+            case_context.get("support_flow_response_plan")
+            or decision_payload.get("support_flow_response_plan")
+            or {}
+        )
+        if support_flow_response_plan and is_deterministic_support_route(
+            support_flow_response_plan.get("route_id")
+        ):
+            return {
+                "allowed": False,
+                "reason": "deterministic_support_route_llm_blocked",
+                "request_payload": None,
+            }
         response_goal = decision_payload.get("response_goal", {}) or {}
         constraints = fallback_payload.get("constraints", {}) or {}
 
@@ -125,6 +154,7 @@ class LLMGateway:
             "case_summary": self._build_case_summary(message, state_analysis, category_analysis, intent_analysis, case_context),
             "guidance_summary": self._build_guidance_summary(decision_payload, routine_payload, memory_payload, response_memory_payload, support_plan),
             "response_goal": response_goal,
+            "support_flow_response_plan": support_flow_response_plan,
             "conversational_intent": conversational_intent,
             "recent_turns": self._build_recent_turns(chat_history),
             "confidence_summary": {
@@ -182,7 +212,7 @@ class LLMGateway:
 
     def _is_openai_llm_enabled(self) -> bool:
         value = str(os.getenv("USE_OPENAI_LLM", "false") or "false").strip().lower()
-        return value in {"1", "true", "yes", "on"}
+        return value in {"1", "true", "yes", "y", "on", "si", "sí", "enabled"}
 
     def _get_openai_model(self) -> str:
         model = str(os.getenv("OPENAI_MODEL", self.DEFAULT_OPENAI_MODEL) or self.DEFAULT_OPENAI_MODEL).strip()
@@ -209,12 +239,203 @@ class LLMGateway:
         if not hasattr(client, "responses"):
             return None, "responses_api_not_available"
         return client, None
+
+    def is_openai_writer_enabled(self) -> bool:
+        return self._is_openai_llm_enabled() and bool(str(os.getenv("OPENAI_API_KEY", "") or "").strip())
+
+    def get_openai_writer_status(self) -> Dict[str, Any]:
+        env_enabled = self._is_openai_llm_enabled()
+        raw_enabled = str(os.getenv("USE_OPENAI_LLM", "") or "").strip()
+        has_api_key = bool(str(os.getenv("OPENAI_API_KEY", "") or "").strip())
+        enabled = env_enabled and has_api_key
+        block_reason = None if enabled else "missing_openai_key_or_disabled"
+        return {
+            "enabled": enabled,
+            "provider": "openai",
+            "model": self._get_openai_model(),
+            "block_reason": block_reason,
+            "env_enabled": env_enabled,
+            "use_openai_llm_raw": raw_enabled,
+            "has_api_key": has_api_key,
+        }
+
+    def rewrite_from_behavioral_plan(self, plan: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        plan = dict(plan or {})
+        request_payload = {
+            "prompt_mode": "stable_demo_behavioral_writer",
+            "message": str(plan.get("recent_user_message") or "").strip(),
+            "behavioral_plan": plan,
+        }
+        if not plan:
+            return self._build_behavioral_writer_fallback_result(
+                request_payload=request_payload,
+                reason="empty_behavioral_plan",
+                llm_enabled=self._is_openai_llm_enabled(),
+            )
+        if not self._is_openai_llm_enabled():
+            return self._build_behavioral_writer_fallback_result(
+                request_payload=request_payload,
+                reason="llm_disabled_by_env",
+                llm_enabled=False,
+            )
+
+        client, client_error = self._get_openai_client()
+        if client is None:
+            return self._build_behavioral_writer_fallback_result(
+                request_payload=request_payload,
+                reason=client_error or "openai_client_unavailable",
+                llm_enabled=True,
+            )
+
+        try:
+            response = client.responses.create(
+                model=self._get_openai_model(),
+                instructions=self._build_behavioral_writer_instructions(plan),
+                input=self._build_behavioral_writer_input(plan),
+                max_output_tokens=260,
+            )
+        except Exception as exc:
+            return self._build_behavioral_writer_fallback_result(
+                request_payload=request_payload,
+                reason=f"openai_request_failed:{type(exc).__name__}",
+                llm_enabled=True,
+            )
+
+        response_text = self._extract_openai_response_text(response)
+        if not response_text:
+            return self._build_behavioral_writer_fallback_result(
+                request_payload=request_payload,
+                reason="empty_openai_response",
+                llm_enabled=True,
+            )
+        normalized = self._normalize_openai_response(
+            response_text=response_text,
+            request_payload=request_payload,
+            llm_enabled=True,
+        )
+        normalized["generation_metadata"] = {
+            **dict(normalized.get("generation_metadata") or {}),
+            "behavioral_writer": True,
+            "route_id": plan.get("route_id"),
+            "support_subject": plan.get("support_subject"),
+            "support_mode": plan.get("support_mode"),
+            "intervention_id": plan.get("intervention_id"),
+        }
+        return normalized
+
+    def _build_behavioral_writer_instructions(self, plan: Dict[str, Any]) -> str:
+        allowed_actions = ", ".join(map(str, (plan.get("allowed_actions") or [])[:10]))
+        forbidden_actions = ", ".join(map(str, (plan.get("forbidden_actions") or [])[:10]))
+        route_id = str(plan.get("route_id") or "").strip()
+        support_subject = str(plan.get("support_subject") or "").strip()
+        support_mode = str(plan.get("support_mode") or "").strip()
+
+        rules = [
+            "Eres la voz de neuroGuIA.",
+            "No decides el dominio ni la intervencion.",
+            "Solo redactas una respuesta humana y util basada en el plan.",
+            "Debes responder directamente al ultimo mensaje del usuario.",
+            "Si el usuario hizo una pregunta concreta o corrigio el dominio, esa respuesta va primero y no avanzas a otro paso.",
+            "Si el plan dice do_not_advance_intervention, no anadas una nueva intervencion ni cambies de plantilla.",
+            f"Debes mantener route_id={route_id}, support_subject={support_subject} y support_mode={support_mode}.",
+            "Usa base_guidance como intencion central, no como texto obligatorio.",
+            "Suena calida, clara, contenedora, casi maternal, sin infantilizar.",
+            "Evita listas largas salvo que ayuden de verdad.",
+            "Evita repetir frases usadas recientemente.",
+            "No suenes como plantilla.",
+            "No digas que eres un modelo.",
+            "No des diagnostico.",
+            "No recomiendes medicamentos ni dosis.",
+            "Si hay riesgo fisico, prioriza seguridad.",
+            "No cambies a otro dominio.",
+            "No introduzcas ansiedad si el dominio es sueno, crisis o bloqueo.",
+            "No introduzcas crisis si el dominio es sueno preventivo.",
+            "No uses sobrepensamiento si el plan lo bloquea o si el usuario dijo que no era sobrepensamiento.",
+            "No uses frases rigidas como 'primero baja una senal del cuerpo' todo el tiempo.",
+            "Longitud: 2 a 5 frases maximo.",
+            "Devuelve solo el texto final.",
+        ]
+        if allowed_actions:
+            rules.append(f"Acciones permitidas: {allowed_actions}.")
+        if forbidden_actions:
+            rules.append(f"Acciones prohibidas: {forbidden_actions}.")
+        if plan.get("safety_boundary"):
+            rules.append(f"Limite de seguridad: {plan.get('safety_boundary')}.")
+        if plan.get("conversation_priority"):
+            rules.append(f"Prioridad conversacional: {plan.get('conversation_priority')}.")
+        if plan.get("current_turn_task"):
+            rules.append(f"Tarea exacta del turno: {plan.get('current_turn_task')}.")
+        if plan.get("blocked_interventions"):
+            rules.append(f"Intervenciones bloqueadas temporalmente: {plan.get('blocked_interventions')}.")
+        if route_id == "medicacion":
+            rules.append("En medicacion, puedes rechazar recomendar medicamentos o dosis; no nombres farmacos concretos.")
+        if route_id == "crisis" and support_subject in {"child", "teen_child"} and support_mode == "acute":
+            rules.append("Crisis de hijo/hija en modo agudo: prioriza seguridad fisica, distancia, retirar objetos peligrosos, pocas palabras y ayuda presencial si hay riesgo.")
+        if route_id == "sueno":
+            rules.append("Ruta sueno: no metas sobrepensamiento, preocupaciones por escrito ni ansiedad salvo que el usuario lo haya mencionado de forma explicita.")
+        return "\n".join(f"- {rule}" for rule in rules)
+
+    def _build_behavioral_writer_input(self, plan: Dict[str, Any]) -> str:
+        compact_plan = {
+            "route_id": plan.get("route_id"),
+            "support_subject": plan.get("support_subject"),
+            "support_mode": plan.get("support_mode"),
+            "intervention_id": plan.get("intervention_id"),
+            "objective": plan.get("objective"),
+            "base_guidance": plan.get("base_guidance"),
+            "recent_user_message": plan.get("recent_user_message"),
+            "recent_context": (plan.get("recent_context") or [])[-5:],
+            "allowed_actions": plan.get("allowed_actions") or [],
+            "forbidden_actions": plan.get("forbidden_actions") or [],
+            "safety_boundary": plan.get("safety_boundary"),
+            "tone": plan.get("tone"),
+            "turn_family": plan.get("turn_family"),
+            "repair_type": plan.get("repair_type"),
+            "current_turn_task": plan.get("current_turn_task"),
+            "conversation_priority": plan.get("conversation_priority"),
+            "must_answer_current_question_first": plan.get("must_answer_current_question_first"),
+            "do_not_advance_intervention": plan.get("do_not_advance_intervention"),
+            "blocked_interventions": plan.get("blocked_interventions") or {},
+        }
+        return (
+            "PLAN CONDUCTUAL YA DECIDIDO POR EL SISTEMA LOCAL:\n"
+            f"{json.dumps(compact_plan, ensure_ascii=False, indent=2)}\n\n"
+            "Redacta la respuesta final para el turno actual sin cambiar ese plan."
+        )
+
+    def _build_behavioral_writer_fallback_result(
+        self,
+        request_payload: Dict[str, Any],
+        reason: str,
+        llm_enabled: bool = False,
+    ) -> Dict[str, Any]:
+        return {
+            "response_text": "",
+            "response_structure": {},
+            "llm_confidence_hint": 0.0,
+            "provider": "openai",
+            "model": self._get_openai_model(),
+            "used_stub_fallback": True,
+            "fallback_reason": reason,
+            "llm_enabled": llm_enabled,
+            "generation_metadata": {
+                "provider": "openai",
+                "model": self._get_openai_model(),
+                "used_stub_fallback": True,
+                "fallback_reason": reason,
+                "llm_enabled": llm_enabled,
+                "behavioral_writer": True,
+                "prompt_mode": request_payload.get("prompt_mode"),
+            },
+        }
+
     def _build_openai_instructions(self, request_payload: Dict[str, Any]) -> str:
         system_rules = request_payload.get("system_rules", []) or []
         conversation_frame = request_payload.get("conversation_frame", {}) or {}
         conversation_control = request_payload.get("conversation_control", {}) or {}
         conversational_intent = request_payload.get("conversational_intent", {}) or {}
         response_goal = request_payload.get("response_goal", {}) or {}
+        support_flow_response_plan = request_payload.get("support_flow_response_plan", {}) or {}
         stage_summary = request_payload.get("stage_summary", {}) or {}
         constraints = request_payload.get("constraints", {}) or {}
         recent_turns = request_payload.get("recent_turns", []) or []
@@ -222,11 +443,13 @@ class LLMGateway:
         rules = [
             "Eres NeuroGuIA y solo redactas la respuesta final para la persona usuaria.",
             "La clasificacion, la seguridad, el dominio y la fase ya fueron decididos por el sistema local.",
+            "Si recibes un support_flow_response_plan, tu trabajo es redactarlo mejor, no cambiarlo.",
             "Responde en espanol claro, calido, cercano, suave, paciente y contenedor; evita sonar tecnico, clinico o rigido.",
             "Haz sentir presencia real: puedes sonar casi maternal si el momento lo pide, sin infantilizar.",
             "No menciones taxonomias internas, nombres tecnicos ni etiquetas del sistema.",
             "No diagnostiques ni sustituyas atencion profesional.",
             "No cambies de dominio por tu cuenta.",
+            "No cambies el problema central ni metas estrategias nuevas si no vienen ya implicitas en el plan base.",
             "Orden sugerido: responde primero al mensaje real del usuario y usa el response_goal solo como direccion de fondo.",
             "Si conversational_intent contradice, suaviza o desvanece el dominio o el response_goal, ignoralo.",
             "Respeta el objetivo del turno, no una forma exacta prefabricada.",
@@ -236,6 +459,9 @@ class LLMGateway:
             "Si la persona pregunta algo concreto, responde eso primero de forma concreta.",
             "No estas obligada a dejar una accion, una pregunta, una lista o una estructura fija en cada turno.",
             "No repitas la misma idea del turno anterior con otras palabras.",
+            "Si la persona pregunta algo concreto como donde escribir, que decir, como conseguir ayuda o aclara que no tiene materiales, responde esa pregunta antes de cualquier paso.",
+            "Si la persona niega sobrepensamiento, no uses sobrepensamiento durante ese turno; permanece en el dominio corregido.",
+            "Si habla de hijo/hija gritando, agresion o querer golpear, prioriza seguridad fisica, distancia, retirar objetos peligrosos y pedir ayuda si hay riesgo inmediato.",
             "Evita caer en formulas repetidas como 'Vamos paso a paso', 'Haz solo esto ahora' o 'Que parte te serviria mas ordenar primero?'.",
             "Evita arranques tipo 'La respuesta mas util aqui es', 'Lo mas util suele ser' o 'En este caso'.",
             "Si el sistema ya subio el nivel de intervencion, haz que tambien cambie la forma visible: apertura, cadencia, estructura o cierre.",
@@ -275,6 +501,28 @@ class LLMGateway:
             rules.append("No es obligatorio cerrar con tarea si la respuesta funciona mejor bajando exigencia o pausando.")
         if response_goal.get("response_shape") == "literal_phrase":
             rules.append("Entrega primero una frase literal usable, no solo una estrategia general.")
+        if support_flow_response_plan:
+            rules.append("Conserva la validacion, la accion central, la frase literal y el tipo de cierre del support_flow_response_plan.")
+            rules.append("Puedes corregir ortografia, tildes, naturalidad y calidez, pero no debes mover la ruta conductual.")
+            rules.append("No cambies route_id, subroute_id, objetivo, seguridad, dominio ni tipo de accion. Solo redacta mejor el plan recibido.")
+            rules.append("La respuesta final debe conservar palabras-ancla de la accion central del plan; si el plan habla de sueño, infancia, crisis, tarea o cuidador, ese dominio debe verse en el texto final.")
+            rules.append("No agregues grounding, validacion emocional generica ni tecnicas de ansiedad si no aparecen en el plan.")
+            rules.append("No uses plantillas recicladas, mecánica interna, ni mensajes donde la persona deba escoger dominio cuando ya hay ruta activa.")
+            rules.append("Bloquea estas frases salvo subruta ansiedad_grounding: 'Tiene sentido que esto te este pesando', 'Vamos primero a bajar la activacion', 'pies en el piso', 'exhalacion mas larga'.")
+            route_id = normalize_input(str(support_flow_response_plan.get("route_id") or ""))
+            subroute_id = normalize_input(str(support_flow_response_plan.get("subroute_id") or ""))
+            if route_id == "crisis":
+                rules.append("Ruta crisis: usa solo entorno, bajar demanda, distancia segura, frase breve, no discutir y no explicar demasiado. Prohibido: pies en el piso, exhalacion, abrir notas o escribir preocupaciones.")
+            if route_id == "sueno":
+                rules.append("Ruta sueño: usa luz, pantalla, ruido, rutina de bajada, mente acelerada, cuerpo activado o entorno. Prohibido: presion real, decision de tareas y grounding de ansiedad.")
+                if subroute_id != "sleep mind racing":
+                    rules.append("En sueño, no uses nota de preocupacion salvo si la subruta es sleep_mind_racing o el plan menciona mente acelerada.")
+            if route_id == "bloqueo ejecutivo":
+                rules.append("Ruta bloqueo ejecutivo: da paso visible, abrir material, elegir materia urgente, escribir titulo o dividir tarea. Prohibido responder con ansiedad generica.")
+            if route_id == "apoyo infancia neurodivergente":
+                rules.append("Ruta infancia: centra la respuesta en la hija/hijo, corregulacion, frases cortas, bajar estimulos o anticipar. Usa sobrepensamiento solo si el usuario lo menciono explicitamente.")
+            if subroute_id:
+                rules.append(f"Subruta bloqueada por el flow_engine: {support_flow_response_plan.get('subroute_id')}.")
         if conversation_control.get("turn_family") == "post_action_followup":
             rules.append("Esto es seguimiento post-accion: no repitas el protocolo anterior; verifica efecto, decide si parar o da un paso distinto.")
         if (conversation_control.get("progression_signals", {}) or {}).get("repeated_post_action_followup"):
@@ -311,6 +559,7 @@ class LLMGateway:
         profile_summary = request_payload.get("profile_summary", {}) or {}
         guidance_summary = request_payload.get("guidance_summary", {}) or {}
         response_goal = request_payload.get("response_goal", {}) or {}
+        support_flow_response_plan = request_payload.get("support_flow_response_plan", {}) or {}
         conversational_intent = request_payload.get("conversational_intent", {}) or {}
         user_context_memory = request_payload.get("user_context_memory", {}) or {}
         constraints = request_payload.get("constraints", {}) or {}
@@ -347,6 +596,7 @@ class LLMGateway:
             "profile_role": profile_summary.get("role"),
             "profile_conditions": profile_summary.get("conditions", []),
             "response_goal": response_goal,
+            "support_flow_response_plan": support_flow_response_plan,
             "conversational_intent": conversational_intent,
             "memory_snapshot": user_context_memory.get("summary_snapshot", {}),
             "helpful_memory": {
@@ -362,6 +612,13 @@ class LLMGateway:
                 "should_close_with_followup": constraints.get("should_close_with_followup"),
             },
         }
+        support_flow_base = ""
+        if support_flow_response_plan:
+            support_flow_base = (
+                "\n\nPLAN CONDUCTUAL YA DECIDIDO:\n"
+                f"{json.dumps(support_flow_response_plan, ensure_ascii=False, indent=2)}"
+            )
+
         return (
             "TRANSCRIPCION RECIENTE:\n"
             f"{transcript}\n\n"
@@ -369,6 +626,7 @@ class LLMGateway:
             f"{request_payload.get('message') or ''}\n\n"
             "CONTEXTO ESTRUCTURADO DEL SISTEMA:\n"
             f"{json.dumps(compact_context, ensure_ascii=False, indent=2)}"
+            f"{support_flow_base}"
         )
 
     def _build_recent_turns(self, chat_history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -549,6 +807,14 @@ class LLMGateway:
             rules.extend(["Explica de forma clara y breve.", "No uses jerga innecesaria."])
         if prompt_mode == "controlled_reflective_feedback":
             rules.append("Ayuda a reflexionar sin sonar evaluativo.")
+        if prompt_mode == "support_flow_humanization":
+            rules.extend(
+                [
+                    "Redacta desde el plan conductual ya decidido sin cambiar la ruta.",
+                    "Tu trabajo principal aqui es humanizar, corregir ortografia, mejorar fluidez y sonar mas cercano.",
+                    "Si el plan trae una frase literal, conservala o solo suavizala sin cambiar su sentido.",
+                ]
+            )
         if primary_state in {"meltdown", "shutdown"}:
             rules.append("Reduce aun mas la exigencia verbal.")
         if category == "ansiedad_cognitiva":

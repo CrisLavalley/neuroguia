@@ -15,7 +15,9 @@ from core.response_curator import ResponseCurator
 from core.routine_builder import RoutineBuilder
 from core.conversation_stages import ConversationStages
 from core.conversational_intent import ConversationalIntentBuilder
+from core.conversational_repair_engine import resolve_conversational_repair
 from core.exceptionality_mapper import ExceptionalityMapper
+from core.support_playbooks import INTERVENTION_BANK
 from core.support_flow_engine import SupportFlowEngine
 from core.llm_gateway import LLMGateway
 from core.learning_engine import LearningEngine
@@ -26,6 +28,2462 @@ from memory.conversation_curation import ConversationCuration
 from memory.response_memory import ResponseMemory
 from memory.profile_manager import ProfileManager
 from memory.user_context_memory import UserContextMemory
+
+
+STABLE_DEMO_STEPS: Dict[str, List[str]] = {
+    route_id: list(interventions.values())
+    for route_id, interventions in INTERVENTION_BANK.items()
+}
+
+STABLE_DEMO_ROUTE_TO_DOMAIN: Dict[str, str] = {
+    "crisis": "crisis_activa",
+    "ansiedad": "ansiedad_cognitiva",
+    "sueno": "sueno_regulacion",
+    "bloqueo_ejecutivo": "disfuncion_ejecutiva",
+    "apoyo_infancia_neurodivergente": "apoyo_infancia_neurodivergente",
+    "sobrecarga_cuidador": "sobrecarga_cuidador",
+    "medicacion": "apoyo_general",
+    "meta": "apoyo_general",
+}
+
+STABLE_DEMO_DOMAIN_TO_ROUTE: Dict[str, str] = {
+    value: key for key, value in STABLE_DEMO_ROUTE_TO_DOMAIN.items()
+}
+
+STABLE_DEMO_GOALS: Dict[str, str] = {
+    "crisis": "contain_and_protect",
+    "ansiedad": "reduce_mental_overload",
+    "sueno": "stabilize_sleep_transition",
+    "bloqueo_ejecutivo": "enable_first_step",
+    "apoyo_infancia_neurodivergente": "support_neurodivergent_child",
+    "sobrecarga_cuidador": "support_caregiver_capacity",
+    "medicacion": "safe_medication_boundary",
+    "meta": "answer_directly",
+}
+
+STABLE_DEMO_PHASES: Dict[str, str] = {
+    "crisis": "stable_demo_crisis",
+    "ansiedad": "stable_demo_ansiedad",
+    "sueno": "stable_demo_sueno",
+    "bloqueo_ejecutivo": "stable_demo_bloqueo",
+    "apoyo_infancia_neurodivergente": "stable_demo_infancia",
+    "sobrecarga_cuidador": "stable_demo_cuidador",
+    "medicacion": "stable_demo_medicacion",
+    "meta": "stable_demo_meta",
+}
+
+STABLE_DEMO_RECENT_WINDOW = 10
+STABLE_DEMO_RECENT_AVOID_WINDOW = 8
+
+
+def _stable_demo_normalize(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(text or "").strip().lower())
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    return " ".join(normalized.split())
+
+
+def _stable_demo_has(normalized: str, phrases: List[str]) -> bool:
+    return any(_stable_demo_normalize(phrase) in normalized for phrase in phrases)
+
+
+STABLE_DEMO_OVERTHINKING_BLOCK_TURNS = 5
+
+
+def _stable_demo_explicit_overthinking_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "sobrepensar",
+            "sobrepensamiento",
+            "sobrepiensa",
+            "pensamientos intrusivos",
+            "pensamiento intrusivo",
+            "pensamientos repetitivos",
+            "pensamiento repetitivo",
+            "rumiacion",
+            "rumiando",
+            "le da vueltas",
+            "le da muchas vueltas",
+            "mente no para",
+            "la mente no para",
+            "mente no se apaga",
+            "la mente no se apaga",
+        ],
+    )
+
+
+def _stable_demo_negates_overthinking(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "no es sobrepensamiento",
+            "no es sobrepensar",
+            "no tiene que ver con sobrepensamiento",
+            "no tiene que ver con sobrepensar",
+            "no es una crisis de sobrepensamiento",
+        ],
+    )
+
+
+def _stable_demo_overthinking_block_remaining(previous_frame: Optional[Dict[str, Any]]) -> int:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    care_context = dict(frame.get("care_context") or {})
+    for source in (frame, support_state, care_context):
+        try:
+            return max(int(source.get("overthinking_block_turns", 0) or 0), 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _stable_demo_recent_context(chat_history: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str]]:
+    recent_context: List[Dict[str, str]] = []
+    for turn in (chat_history or [])[-5:]:
+        if not isinstance(turn, dict):
+            continue
+        user_text = str(turn.get("user") or "").strip()
+        assistant_text = str(turn.get("assistant") or "").strip()
+        if not user_text and not assistant_text:
+            continue
+        recent_context.append(
+            {
+                "user": user_text[:500],
+                "assistant": assistant_text[:700],
+            }
+        )
+    return recent_context
+
+
+def _stable_demo_variant_offset(seed_text: str, modulo: int) -> int:
+    if modulo <= 1:
+        return 0
+    weighted = sum((index + 1) * ord(char) for index, char in enumerate(str(seed_text or "")))
+    return weighted % modulo
+
+
+def _stable_demo_quick_button_message(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "me siento muy ansiosa o y no se como calmarme",
+            "me siento muy ansiosa y no se como calmarme",
+            "me siento muy ansioso y no se como calmarme",
+            "esta ocurriendo una crisis y necesito ayuda para manejarla",
+            "hay problemas de sueno y eso esta afectando mucho",
+            "hay problemas de sue o y eso esta afectando mucho",
+            "no puedo organizarme ni empezar lo que tengo pendiente",
+        ],
+    )
+
+
+def _stable_demo_anxiety_crisis_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "crisis de ansiedad",
+            "ataque de ansiedad",
+            "ansiedad fuerte",
+            "ansiedad muy fuerte",
+            "ataque de panico",
+            "crisis ansiosa",
+        ],
+    )
+
+
+def _stable_demo_timer_done_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "ya termino el timer",
+            "ya termin el timer",
+            "ya termino el temporizador",
+            "ya termin el temporizador",
+            "ya termino",
+            "ya termin",
+            "ya termino el tiempo",
+            "ya termin el tiempo",
+            "ya paso el tiempo",
+            "ya pasaron los dos minutos",
+            "ya pasaron 2 minutos",
+            "se acabo el timer",
+            "se acabo el temporizador",
+        ],
+    )
+
+
+def _stable_demo_llm_block_reason(
+    llm_result: Optional[Dict[str, Any]],
+    llm_curated_payload: Optional[Dict[str, Any]],
+    default_reason: Optional[str] = None,
+) -> Optional[str]:
+    if llm_result and llm_result.get("fallback_reason"):
+        return str(llm_result.get("fallback_reason") or "").strip() or default_reason
+    notes = list((llm_curated_payload or {}).get("curation_notes", []) or [])
+    for note in notes:
+        text = str(note or "").strip()
+        if text.startswith("rejected="):
+            return text.split("=", 1)[1].strip() or default_reason
+    if llm_curated_payload and not bool(llm_curated_payload.get("approved")):
+        return "curator_rejected"
+    return default_reason
+
+
+def _stable_demo_is_child_sleep_plan(
+    route_id: str,
+    support_subject: str,
+    intervention_id: Optional[str],
+    normalized: str,
+) -> bool:
+    child_sleep_interventions = {
+        "sueno_infancia",
+        "teen_sueno_activacion_cognitiva",
+        "teen_rutina_baja_demanda",
+        "teen_descompresion_sensorial",
+        "teen_ansiedad_anticipatoria",
+    }
+    return (
+        route_id == "apoyo_infancia_neurodivergente"
+        and support_subject in {"child", "teen_child"}
+        and (
+            _stable_demo_has_sleep_marker(normalized)
+            or str(intervention_id or "").strip() in child_sleep_interventions
+        )
+    )
+
+
+def _stable_demo_behavioral_contract(
+    route_id: str,
+    support_subject: str,
+    support_mode: str,
+    intervention_id: Optional[str],
+    normalized: str,
+) -> Dict[str, Any]:
+    support_mode = str(support_mode or "").strip()
+
+    objective = STABLE_DEMO_GOALS.get(route_id, "clarify_and_support")
+    allowed_actions: List[str] = []
+    forbidden_actions: List[str] = []
+    safety_boundary = "Mantener la ruta local ya decidida; no diagnosticar ni abrir dominios nuevos."
+
+    if route_id == "ansiedad":
+        objective = "responder al turno concreto mientras baja la carga mental"
+        allowed_actions = [
+            "respiraci\u00f3n",
+            "grounding",
+            "descarga mental",
+            "decisi\u00f3n simple",
+        ]
+        forbidden_actions = [
+            "crisis de hijo",
+            "sue\u00f1o",
+            "medicaci\u00f3n",
+            "diagn\u00f3stico",
+        ]
+        safety_boundary = "No convertir ansiedad en crisis, sue\u00f1o o medicaci\u00f3n; responder primero a la pregunta concreta."
+        if support_mode == "acute" or _stable_demo_anxiety_crisis_marker(normalized):
+            objective = "contener una crisis de ansiedad como ansiedad aguda, sin convertirla en crisis externa"
+            allowed_actions = [
+                "respiraci\u00f3n simple",
+                "orientaci\u00f3n al presente",
+                "bajar demanda",
+                "acompa\u00f1amiento directo",
+            ]
+            forbidden_actions.extend(
+                [
+                    "distancia segura",
+                    "retirar objetos",
+                    "no invadir espacio",
+                    "crisis externa",
+                    "crisis de hijo",
+                ]
+            )
+            safety_boundary = "Crisis de ansiedad = ansiedad aguda; no usar guion de crisis externa ni agresion."
+    elif route_id == "crisis":
+        objective = "contener y proteger con acciones inmediatas y pocas palabras"
+        allowed_actions = [
+            "seguridad",
+            "bajar est\u00edmulos",
+            "frase breve",
+            "distancia segura",
+            "retirar objetos",
+            "pedir ayuda si hay riesgo",
+        ]
+        forbidden_actions = [
+            "sobrepensamiento",
+            "tarea",
+            "sue\u00f1o",
+            "meditaci\u00f3n larga",
+            "grounding de ansiedad",
+        ]
+        safety_boundary = "Si hay riesgo f\u00edsico, priorizar seguridad del entorno, distancia segura y ayuda real."
+    elif route_id == "sueno" or _stable_demo_is_child_sleep_plan(
+        route_id=route_id,
+        support_subject=support_subject,
+        intervention_id=intervention_id,
+        normalized=normalized,
+    ):
+        objective = "preparar el cuerpo para dormir sin pelea ni sobreexplicaci\u00f3n"
+        allowed_actions = [
+            "rutina de bajada",
+            "baja demanda",
+            "pantallas",
+            "luz",
+            "pensamientos intrusivos",
+            "acuerdo breve",
+        ]
+        forbidden_actions = [
+            "crisis",
+            "distancia segura",
+            "no discutir",
+            "grounding de ansiedad de la madre",
+            "tarea",
+            "sobrepensamiento",
+            "escribir preocupaciones por defecto",
+        ]
+        safety_boundary = "Mantener sue\u00f1o preventivo o regulaci\u00f3n de sue\u00f1o; no meter crisis ni ansiedad como dominio."
+    elif route_id == "bloqueo_ejecutivo":
+        objective = "hacer posible el primer movimiento sin exigir claridad total"
+        allowed_actions = [
+            "nombrar la tarea",
+            "abrir material si existe",
+            "hoja o nota",
+            "t\u00edtulo feo",
+            "temporizador breve",
+            "primer pedacito",
+        ]
+        forbidden_actions = [
+            "crisis",
+            "sue\u00f1o",
+            "medicaci\u00f3n",
+            "grounding de ansiedad",
+            "diagn\u00f3stico",
+        ]
+        safety_boundary = "No insistir en un archivo si la persona dice que no hay archivo; bajar la tarea a una entrada visible."
+    elif route_id == "apoyo_infancia_neurodivergente":
+        objective = "acompa\u00f1ar al hijo o hija neurodivergente sin centrar el problema en la madre"
+        allowed_actions = [
+            "corregulaci\u00f3n",
+            "bajar est\u00edmulos",
+            "frases cortas",
+            "rutina visual",
+            "una preocupaci\u00f3n",
+            "anticipaci\u00f3n breve",
+        ]
+        forbidden_actions = [
+            "grounding de ansiedad de la madre",
+            "tarea",
+            "medicaci\u00f3n",
+            "diagn\u00f3stico",
+            "sue\u00f1o si el turno no lo pide",
+        ]
+        safety_boundary = "Centrar la ayuda en el ni\u00f1o, ni\u00f1a o adolescente; si aparece riesgo f\u00edsico, la ruta local debe ser crisis."
+    elif route_id == "sobrecarga_cuidador":
+        objective = "bajar carga del cuidador con una acci\u00f3n posible y compasiva"
+        allowed_actions = [
+            "validaci\u00f3n",
+            "bajar carga",
+            "pedir ayuda concreta",
+            "una prioridad",
+            "pausa sin culpa",
+        ]
+        forbidden_actions = [
+            "grounding de ansiedad",
+            "tarea acad\u00e9mica",
+            "sue\u00f1o",
+            "medicaci\u00f3n",
+            "diagn\u00f3stico",
+        ]
+        safety_boundary = "No convertir sobrecarga de cuidado en tarea, sue\u00f1o o medicaci\u00f3n."
+    elif route_id == "medicacion":
+        objective = "poner un l\u00edmite seguro sobre medicamentos y ofrecer alternativa no farmacol\u00f3gica"
+        allowed_actions = [
+            "l\u00edmite m\u00e9dico",
+            "consulta profesional",
+            "medida no farmacol\u00f3gica",
+            "seguridad",
+        ]
+        forbidden_actions = [
+            "recomendar medicamentos",
+            "dosis",
+            "nombres de f\u00e1rmacos",
+            "diagn\u00f3stico",
+        ]
+        safety_boundary = "Nunca recomendar medicamentos, dosis ni f\u00e1rmacos; redirigir a profesional de salud."
+    elif route_id == "meta":
+        objective = "responder la pregunta sobre NeuroGuIA de forma directa y humana"
+        allowed_actions = ["respuesta directa", "presencia", "claridad"]
+        forbidden_actions = ["diagn\u00f3stico", "medicaci\u00f3n", "cambiar a crisis sin se\u00f1al local"]
+        safety_boundary = "Responder solo la pregunta meta sin abrir intervenci\u00f3n cl\u00ednica innecesaria."
+
+    return {
+        "objective": objective,
+        "allowed_actions": allowed_actions,
+        "forbidden_actions": forbidden_actions,
+        "safety_boundary": safety_boundary,
+    }
+
+
+def _stable_demo_build_behavioral_plan(
+    *,
+    route_id: str,
+    support_subject: str,
+    support_mode: str,
+    intervention_id: Optional[str],
+    response_text: str,
+    message: str,
+    previous_frame: Optional[Dict[str, Any]],
+    chat_history: Optional[List[Dict[str, Any]]],
+    turn_family: str,
+    step_index: int,
+) -> Dict[str, Any]:
+    normalized = _stable_demo_normalize(message)
+    contract = _stable_demo_behavioral_contract(
+        route_id=route_id,
+        support_subject=support_subject,
+        support_mode=support_mode,
+        intervention_id=intervention_id,
+        normalized=normalized,
+    )
+    previous_assistant = ""
+    if previous_frame:
+        previous_assistant = str(
+            previous_frame.get("last_guided_action")
+            or previous_frame.get("last_action_instruction")
+            or ""
+        ).strip()
+
+    return {
+        "route_id": route_id,
+        "support_subject": support_subject,
+        "support_mode": support_mode,
+        "intervention_id": intervention_id,
+        "objective": contract.get("objective"),
+        "base_guidance": response_text,
+        "recent_user_message": message,
+        "recent_context": _stable_demo_recent_context(chat_history),
+        "allowed_actions": list(contract.get("allowed_actions") or []),
+        "forbidden_actions": list(contract.get("forbidden_actions") or []),
+        "safety_boundary": contract.get("safety_boundary"),
+        "tone": "c\u00e1lido, claro, contenedor, casi maternal",
+        "turn_family": turn_family,
+        "step_index": step_index,
+        "current_turn_task": "Responder al ultimo mensaje real del usuario antes de cualquier guia de fondo.",
+        "previous_assistant_guidance": previous_assistant,
+    }
+
+
+def _stable_demo_previous_route(previous_frame: Optional[Dict[str, Any]]) -> Optional[str]:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    candidates = [
+        frame.get("stable_demo_route_id"),
+        frame.get("route_id"),
+        support_state.get("route_id"),
+        support_state.get("active_route_id"),
+        frame.get("active_route_id"),
+        STABLE_DEMO_DOMAIN_TO_ROUTE.get(str(frame.get("conversation_domain") or "").strip()),
+    ]
+    for candidate in candidates:
+        route = str(candidate or "").strip()
+        if route in STABLE_DEMO_ROUTE_TO_DOMAIN:
+            return route
+    return None
+
+
+def _stable_demo_previous_step(previous_frame: Optional[Dict[str, Any]]) -> int:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    for key_source, key in [
+        (frame, "stable_demo_step_index"),
+        (frame, "step_index"),
+        (support_state, "step_index"),
+    ]:
+        try:
+            return max(int(key_source.get(key, 0) or 0), 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _stable_demo_used_interventions(previous_frame: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    raw = frame.get("used_interventions")
+    if not isinstance(raw, dict):
+        raw = support_state.get("used_interventions")
+    if not isinstance(raw, dict):
+        return {}
+
+    used: Dict[str, List[str]] = {}
+    for route_id, interventions in raw.items():
+        route = str(route_id or "").strip()
+        if route not in INTERVENTION_BANK:
+            continue
+        seen: List[str] = []
+        for intervention_id in interventions or []:
+            key = str(intervention_id or "").strip()
+            if key in INTERVENTION_BANK[route] and key not in seen:
+                seen.append(key)
+        if seen:
+            used[route] = seen
+    return used
+
+
+def _stable_demo_recent_interventions(previous_frame: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    raw = frame.get("used_interventions_last_10")
+    if not isinstance(raw, dict):
+        raw = support_state.get("used_interventions_last_10")
+    if not isinstance(raw, dict):
+        raw = frame.get("used_interventions")
+    if not isinstance(raw, dict):
+        raw = support_state.get("used_interventions")
+    if not isinstance(raw, dict):
+        return {}
+
+    recent: Dict[str, List[str]] = {}
+    for route_id, interventions in raw.items():
+        route = str(route_id or "").strip()
+        if route not in INTERVENTION_BANK:
+            continue
+        cleaned: List[str] = []
+        for intervention_id in interventions or []:
+            key = str(intervention_id or "").strip()
+            if key in INTERVENTION_BANK[route]:
+                cleaned.append(key)
+        if cleaned:
+            recent[route] = cleaned[-STABLE_DEMO_RECENT_WINDOW:]
+    return recent
+
+
+def _stable_demo_exhausted_strategies(previous_frame: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    raw = frame.get("exhausted_strategies")
+    if not isinstance(raw, dict):
+        raw = support_state.get("exhausted_strategies")
+    if not isinstance(raw, dict):
+        return {}
+
+    exhausted: Dict[str, List[str]] = {}
+    for route_id, strategies in raw.items():
+        route = str(route_id or "").strip()
+        if not route:
+            continue
+        cleaned: List[str] = []
+        for strategy in strategies or []:
+            key = str(strategy or "").strip()
+            if key and key not in cleaned:
+                cleaned.append(key)
+        if cleaned:
+            exhausted[route] = cleaned
+    return exhausted
+
+
+def _stable_demo_add_exhausted_strategy(
+    previous_frame: Optional[Dict[str, Any]],
+    route_id: Optional[str],
+    strategy_id: Optional[str],
+) -> Dict[str, List[str]]:
+    exhausted = _stable_demo_exhausted_strategies(previous_frame)
+    route = str(route_id or "").strip()
+    strategy = str(strategy_id or "").strip()
+    if not route or not strategy:
+        return exhausted
+    route_exhausted = list(exhausted.get(route, []) or [])
+    if strategy not in route_exhausted:
+        route_exhausted.append(strategy)
+    exhausted[route] = route_exhausted
+    return exhausted
+
+
+def _stable_demo_update_recent_interventions(
+    recent_interventions: Dict[str, List[str]],
+    route_id: str,
+    intervention_id: Optional[str],
+) -> Dict[str, List[str]]:
+    next_recent: Dict[str, List[str]] = {}
+    for route, interventions in (recent_interventions or {}).items():
+        route_key = str(route or "").strip()
+        if route_key not in INTERVENTION_BANK:
+            continue
+        cleaned = [
+            str(item or "").strip()
+            for item in (interventions or [])
+            if str(item or "").strip() in INTERVENTION_BANK[route_key]
+        ]
+        if cleaned:
+            next_recent[route_key] = cleaned[-STABLE_DEMO_RECENT_WINDOW:]
+
+    route = str(route_id or "").strip()
+    selected = str(intervention_id or "").strip()
+    if route in INTERVENTION_BANK and selected in INTERVENTION_BANK[route]:
+        route_recent = list(next_recent.get(route, []) or [])
+        route_recent.append(selected)
+        next_recent[route] = route_recent[-STABLE_DEMO_RECENT_WINDOW:]
+
+    return next_recent
+
+
+def _stable_demo_previous_intervention(previous_frame: Optional[Dict[str, Any]]) -> Optional[str]:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    for candidate in [
+        frame.get("last_intervention_id"),
+        frame.get("stable_demo_intervention_id"),
+        support_state.get("last_intervention_id"),
+    ]:
+        key = str(candidate or "").strip()
+        if key:
+            return key
+    return None
+
+
+def _stable_demo_previous_subject(previous_frame: Optional[Dict[str, Any]]) -> str:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    care_context = dict(frame.get("care_context") or {})
+    for candidate in [
+        frame.get("support_subject"),
+        support_state.get("support_subject"),
+        care_context.get("support_subject"),
+    ]:
+        subject = str(candidate or "").strip()
+        if subject in {"self", "child", "teen_child", "caregiver", "partner", "family", "unknown"}:
+            return subject
+    return "unknown"
+
+
+def _stable_demo_previous_mode(previous_frame: Optional[Dict[str, Any]]) -> str:
+    frame = previous_frame or {}
+    support_state = dict(frame.get("support_flow_state") or {})
+    care_context = dict(frame.get("care_context") or {})
+    for candidate in [
+        frame.get("support_mode"),
+        support_state.get("support_mode"),
+        care_context.get("support_mode"),
+    ]:
+        mode = str(candidate or "").strip()
+        if mode in {"acute", "preventive", "supportive", "co_regulation", "reflection"}:
+            return mode
+    return "supportive"
+
+
+def _stable_demo_repeat_complaint(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "eso ya me lo dijiste",
+            "eso ya lo dijiste",
+            "ya me lo dijiste",
+            "sigues repitiendo",
+            "estas repitiendo",
+            "estás repitiendo",
+            "repites",
+            "otra vez",
+        ],
+    )
+
+
+def _stable_demo_wants_another(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "que mas",
+            "qué más",
+            "y luego",
+            "despues",
+            "despues que",
+            "otra cosa",
+            "no me sirve",
+            "eso no me sirve",
+            "que sigue",
+            "qué sigue",
+            "ahora que",
+            "ahora qué",
+            "dame opciones",
+            "no se como",
+            "no sé cómo",
+        ],
+    )
+
+
+def _stable_demo_wants_pause(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "paramos aqui",
+            "paremos aqui",
+            "hasta aqui",
+            "aqui paro",
+            "ya estuvo",
+            "por ahora ya",
+            "quiero parar",
+            "quiero pausar",
+            "dejemoslo aqui",
+            "dejemoslo por ahora",
+        ],
+    )
+
+
+def _stable_demo_has_sleep_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "sueno",
+            "sue o",
+            "dormir",
+            "duermo",
+            "duerme",
+            "duermen",
+            "desvelo",
+            "insomnio",
+            "no descanso",
+            "acostarse",
+            "hora de dormir",
+        ],
+    )
+
+
+def _stable_demo_has_executive_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "bloqueo",
+            "bloqueada",
+            "bloqueado",
+            "no puedo organizarme",
+            "organizarme",
+            "no puedo empezar",
+            "me cuesta arrancar",
+            "abrir archivo",
+            "temporizador",
+            "tarea",
+            "pendiente",
+            "no se por donde empezar",
+        ],
+    )
+
+
+def _stable_demo_has_child_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "mi hijo",
+            "mi hija",
+            "mis hijos",
+            "mis hijas",
+            "mi nino",
+            "mi nina",
+            "mi ni o",
+            "mi ni a",
+            "hijo",
+            "hija",
+            "nino",
+            "nina",
+            "ni o",
+            "ni a",
+            "menor",
+            "pequeno",
+            "pequena",
+        ],
+    )
+
+
+def _stable_demo_has_teen_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "adolescente",
+            "mi adolescente",
+            "hijo adolescente",
+            "hija adolescente",
+            "teen",
+            "secundaria",
+            "prepa",
+            "bachillerato",
+            "15 anos",
+            "16 anos",
+            "17 anos",
+        ],
+    )
+
+
+def _stable_demo_has_caregiver_marker(normalized: str) -> bool:
+    direct = _stable_demo_has(
+        normalized,
+        [
+            "cuidador",
+            "cuidadora",
+            "como mama",
+            "como madre",
+            "como papa",
+            "como padre",
+            "soy mama",
+            "soy madre",
+            "soy papa",
+            "soy padre",
+            "cuidando",
+            "nadie me ayuda",
+            "me toca sostener",
+        ],
+    )
+    overload_with_child = _stable_demo_has(
+        normalized,
+        [
+            "ya no puedo",
+            "no puedo mas",
+            "me rebasa",
+            "estoy agotada",
+            "estoy agotado",
+            "no doy mas",
+        ],
+    ) and _stable_demo_has_child_marker(normalized)
+    return direct or overload_with_child
+
+
+def _stable_demo_has_partner_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "mi pareja",
+            "mi esposo",
+            "mi esposa",
+            "mi marido",
+            "mi novia",
+            "mi novio",
+        ],
+    )
+
+
+def _stable_demo_has_family_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "mi familia",
+            "familia",
+            "todos en casa",
+            "en casa todos",
+            "mis hijos y yo",
+        ],
+    )
+
+
+def _stable_demo_child_aggression_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "grita",
+            "gritando",
+            "esta gritando",
+            "quiere golpear",
+            "quiere pegar",
+            "golpear a su papa",
+            "golpear a su padre",
+            "golpear a su mama",
+            "golpear a su madre",
+            "agresivo",
+            "agresiva",
+            "se esta lastimando",
+            "se lastima",
+            "quiere lastimar",
+            "quiere lastimarse",
+            "quiere lastimarlo",
+            "quiere lastimarla",
+        ],
+    )
+
+
+def _stable_demo_explicit_escalation(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "esta ocurriendo una crisis",
+            "hay una crisis",
+            "hay crisis",
+            "en crisis",
+            "meltdown",
+            "hay riesgo",
+            "peligro",
+            "emergencia",
+            "gritando",
+            "esta gritando",
+            "quiere golpear",
+            "quiere pegar",
+            "golpear a su papa",
+            "golpear a su padre",
+            "agresivo",
+            "agresiva",
+            "se esta golpeando",
+            "esta golpeando",
+            "se golpea",
+            "se quiere golpear",
+            "se esta lastimando",
+            "quiere lastimar",
+            "lastimarse",
+            "lastimarme",
+            "lastimarlo",
+            "lastimarla",
+            "no puedo mantenerlo seguro",
+            "no puedo mantenerla segura",
+            "no puedo mantenerme seguro",
+            "no puedo mantenerme segura",
+            "se quiere morir",
+            "me quiero morir",
+            "suicid",
+        ],
+    )
+
+
+def _stable_demo_detect_subject(
+    message: str,
+    previous_frame: Optional[Dict[str, Any]],
+    route_id: Optional[str] = None,
+) -> str:
+    normalized = _stable_demo_normalize(message)
+    previous_subject = _stable_demo_previous_subject(previous_frame)
+
+    if _stable_demo_has_partner_marker(normalized):
+        return "partner"
+    if _stable_demo_has_teen_marker(normalized):
+        return "teen_child"
+    if _stable_demo_has_family_marker(normalized) and not _stable_demo_has_child_marker(normalized):
+        return "family"
+    if _stable_demo_explicit_escalation(normalized) and _stable_demo_has_child_marker(normalized):
+        return "child"
+    if _stable_demo_has_caregiver_marker(normalized) and not _stable_demo_has_sleep_marker(normalized):
+        return "caregiver"
+    if _stable_demo_has_child_marker(normalized):
+        return "child"
+    if _stable_demo_has_caregiver_marker(normalized):
+        return "caregiver"
+    if _stable_demo_has(
+        normalized,
+        [
+            "yo",
+            "me siento",
+            "me da",
+            "mi ansiedad",
+            "no puedo dormir",
+            "estoy bloqueada",
+            "estoy bloqueado",
+        ],
+    ):
+        return "self"
+    if previous_subject != "unknown":
+        return previous_subject
+    if route_id == "apoyo_infancia_neurodivergente":
+        return "child"
+    if route_id == "sobrecarga_cuidador":
+        return "caregiver"
+    if route_id in {"ansiedad", "sueno", "bloqueo_ejecutivo", "crisis"}:
+        return "self"
+    return "unknown"
+
+
+def _stable_demo_detect_mode(
+    message: str,
+    previous_frame: Optional[Dict[str, Any]],
+    route_id: Optional[str],
+    support_subject: str,
+) -> str:
+    normalized = _stable_demo_normalize(message)
+    if route_id == "ansiedad" and _stable_demo_anxiety_crisis_marker(normalized):
+        return "acute"
+    if _stable_demo_explicit_escalation(normalized):
+        return "acute"
+    if _stable_demo_has(
+        normalized,
+        [
+            "prevenir",
+            "prevencion",
+            "preventivo",
+            "para que no",
+            "antes de que",
+            "anticipar",
+            "anticipacion",
+            "plan",
+            "rutina",
+            "senales tempranas",
+        ],
+    ):
+        return "preventive"
+    if support_subject in {"child", "teen_child"} and _stable_demo_has(
+        normalized,
+        [
+            "calmarlo",
+            "calmarla",
+            "regularlo",
+            "regularla",
+            "coregular",
+            "corregular",
+            "acompanarlo",
+            "acompanarla",
+            "se desregula",
+            "se satura",
+        ],
+    ):
+        return "co_regulation"
+    if _stable_demo_has(
+        normalized,
+        [
+            "entender",
+            "por que",
+            "reflexionar",
+            "pensar esto",
+            "no se que me pasa",
+            "quiero ordenar",
+        ],
+    ):
+        return "reflection"
+
+    previous_mode = _stable_demo_previous_mode(previous_frame)
+    if previous_mode in {"acute", "preventive", "co_regulation", "reflection"} and _stable_demo_wants_another(normalized):
+        return previous_mode
+    if route_id == "crisis":
+        return "acute"
+    return "supportive"
+
+
+def _stable_demo_reports_relief(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "bajo un poco",
+            "bajÃ³ un poco",
+            "aflojo un poco",
+            "aflojÃ³ un poco",
+            "me ayudo",
+            "me ayudÃ³",
+            "ya estoy mejor",
+            "me siento mejor",
+            "ya bajo",
+            "ya bajÃ³",
+            "se calmo",
+            "se calmÃ³",
+        ],
+    )
+
+
+def _stable_demo_shared_heavy_load(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "no puedo",
+            "me rebasa",
+            "me gana",
+            "no puedo con todo",
+            "sola con esto",
+            "solo con esto",
+            "muy ansiosa",
+            "muy ansioso",
+            "bloqueada",
+            "bloqueado",
+            "crisis",
+        ],
+    )
+
+
+def _stable_demo_emotional_close(
+    route_id: str,
+    normalized: str,
+    turn_family: str,
+    step_index: int,
+    support_subject: str = "unknown",
+    support_mode: str = "supportive",
+) -> Optional[str]:
+    if route_id in {"meta", "medicacion"}:
+        return None
+    if _stable_demo_wants_pause(normalized):
+        return "Aquí podemos pausar. Si necesitas seguir, seguimos desde aquí."
+    if _stable_demo_reports_relief(normalized):
+        if route_id == "sueno":
+            return "Si bajo un poco la activacion, sosten solo eso y no agregues mas pasos."
+        if route_id == "bloqueo_ejecutivo":
+            return "Si ya hubo un primer movimiento, eso cuenta; el siguiente puede seguir igual de pequeno."
+        if support_subject in {"child", "teen_child"}:
+            return "Si bajo un poco, manten la misma ayuda sin sumar demandas nuevas."
+        if support_mode == "preventive":
+            return "Para prevenir, basta con dejar visible un paso pequeno y repetible."
+    return None
+
+
+def _stable_demo_apply_emotional_close(
+    response_text: str,
+    route_id: str,
+    normalized: str,
+    turn_family: str,
+    step_index: int,
+    support_subject: str = "unknown",
+    support_mode: str = "supportive",
+) -> str:
+    close = _stable_demo_emotional_close(
+        route_id=route_id,
+        normalized=normalized,
+        turn_family=turn_family,
+        step_index=step_index,
+        support_subject=support_subject,
+        support_mode=support_mode,
+    )
+    if not close or close in response_text:
+        return response_text
+    return f"{response_text}\n\n{close}"
+
+
+def _stable_demo_preferred_interventions(
+    route_id: str,
+    normalized: str,
+    support_subject: str = "unknown",
+    support_mode: str = "supportive",
+) -> List[str]:
+    if route_id == "crisis":
+        if support_subject in {"child", "teen_child"}:
+            if support_mode == "acute" or _stable_demo_explicit_escalation(normalized):
+                return ["crisis_hijo_coregulacion", "seguridad_entorno", "bajar_estimulos", "distancia_segura"]
+            return ["crisis_hijo_coregulacion", "bajar_estimulos"]
+        if support_subject == "self":
+            return ["crisis_self_bajar_estimulos", "crisis_self_contacto_apoyo", "bajar_estimulos", "distancia_segura"]
+
+    if route_id == "apoyo_infancia_neurodivergente":
+        if support_subject == "teen_child" and _stable_demo_has_sleep_marker(normalized):
+            return [
+                "teen_rutina_baja_demanda",
+                "teen_descompresion_sensorial",
+                "teen_ansiedad_anticipatoria",
+                "teen_sueno_activacion_cognitiva",
+            ]
+        if support_subject == "child" and _stable_demo_has_sleep_marker(normalized):
+            return ["sueno_infancia", "rutina_visual", "reduccion_sensorial"]
+        if support_mode == "preventive":
+            return ["rutina_visual", "reduccion_sensorial", "comunicacion_concreta"]
+        if support_mode == "co_regulation":
+            return ["corregulacion", "reduccion_sensorial", "comunicacion_concreta"]
+
+    if route_id == "sobrecarga_cuidador":
+        if support_mode == "preventive":
+            return ["prioridad_cuidador", "pedir_ayuda_concreta", "bajar_carga"]
+        return ["validacion_cuidador", "bajar_carga", "prioridad_cuidador", "pausa_sin_culpa"]
+    if _stable_demo_has(normalized, ["medita", "meditar", "meditacion", "meditación"]):
+        if route_id == "sueno":
+            return ["meditacion_sueno", "rutina_bajada"]
+        if route_id == "ansiedad":
+            return ["meditacion_ansiedad", "meditacion_1_minuto", "respiracion_1_min"]
+        return ["corregulacion"]
+
+    if route_id == "ansiedad":
+        if support_mode == "acute" or _stable_demo_anxiety_crisis_marker(normalized):
+            return ["respiracion_1_min", "grounding_pies", "meditacion_1_minuto"]
+        if _stable_demo_has(normalized, ["respira", "respiracion", "respiración", "aire"]):
+            return ["respiracion_1_min", "grounding_pies"]
+        if _stable_demo_has(normalized, ["5 4 3", "54321", "cinco sentidos", "sentidos"]):
+            return ["grounding_54321"]
+        if _stable_demo_has(normalized, ["preocupacion", "preocupación", "preocupa", "mente"]):
+            return ["descarga_mental", "decision_hoy_no_hoy"]
+        return []
+
+    if route_id == "crisis":
+        if _stable_demo_has(normalized, ["que digo", "qué digo", "frase", "que le digo", "qué le digo"]):
+            return ["frase_literal"]
+        if _stable_demo_has(normalized, ["distancia", "espacio", "seguro", "segura"]):
+            return ["distancia_segura", "seguridad_entorno"]
+        if _stable_demo_has(normalized, ["discute", "discutir", "no entiende"]):
+            return ["no_discutir"]
+        if _stable_demo_has(normalized, ["mi hijo", "mi hija", "hijo", "hija"]):
+            return ["crisis_hijo_coregulacion", "bajar_estimulos"]
+        return []
+
+    if route_id == "sueno":
+        if _stable_demo_has(normalized, ["pensamientos intrusivos", "pensamiento intrusivo", "intrusivos"]):
+            return ["pensamientos_intrusivos", "mente_acelerada"]
+        if _stable_demo_has(normalized, ["mente acelerada", "preocupacion", "preocupación", "no se apaga"]):
+            return ["mente_acelerada"]
+        if _stable_demo_has(normalized, ["cuerpo activado", "inquieto", "palpitaciones", "tension", "tensión"]):
+            return ["cuerpo_activado"]
+        if _stable_demo_has(normalized, ["luz", "ruido", "pantalla", "entorno"]):
+            return ["entorno", "rutina_bajada"]
+        if _stable_demo_has(normalized, ["no puedo dormir", "insomnio", "desvelo"]):
+            return ["si_no_puede_dormir", "rutina_bajada"]
+        return []
+
+    if route_id == "bloqueo_ejecutivo":
+        if _stable_demo_has(normalized, ["opciones", "dame opciones", "tres opciones"]):
+            return ["tres_opciones"]
+        if _stable_demo_has(normalized, ["temporizador", "timer", "2 minutos", "dos minutos"]):
+            return ["temporizador"]
+        if _stable_demo_has(normalized, ["titulo", "título", "frase"]):
+            return ["titulo_feo"]
+        if _stable_demo_has(normalized, ["no se como", "no sé cómo", "no se que toca", "no sé qué toca"]):
+            return ["si_no_sabe_que_toca", "tres_opciones"]
+        return []
+
+    if route_id == "apoyo_infancia_neurodivergente":
+        if _stable_demo_has(normalized, ["dormir", "duerman", "duerme", "sueno", "sue o"]):
+            return ["sueno_infancia", "rutina_visual", "reduccion_sensorial"]
+        if _stable_demo_explicit_overthinking_marker(normalized):
+            return ["sobrepensamiento"]
+        if _stable_demo_has(normalized, ["intrusivos", "pensamiento intrusivo", "pensamientos intrusivos"]):
+            return ["pensamientos_intrusivos"]
+        if _stable_demo_has(normalized, ["que les digo", "qué les digo", "como les digo", "cómo les digo", "frase"]):
+            return ["comunicacion_concreta"]
+        if _stable_demo_has(normalized, ["rutina", "visual", "anticipacion", "anticipación"]):
+            return ["rutina_visual"]
+        if _stable_demo_has(normalized, ["estimulos", "estímulos", "ruido", "luz", "sensorial"]):
+            return ["reduccion_sensorial"]
+        return []
+
+    return []
+
+
+def _stable_demo_explicit_intervention_requests(route_id: str, normalized: str) -> List[str]:
+    requested: List[str] = []
+
+    def add(*keys: str) -> None:
+        for key in keys:
+            if key in INTERVENTION_BANK.get(route_id, {}) and key not in requested:
+                requested.append(key)
+
+    if _stable_demo_has(normalized, ["medita", "meditar", "meditacion", "meditaciÃ³n"]):
+        add("meditacion_sueno", "meditacion_ansiedad", "meditacion_1_minuto")
+    if _stable_demo_has(normalized, ["respira", "respiracion", "respiraciÃ³n"]):
+        add("respiracion_1_min")
+    if route_id == "ansiedad" and _stable_demo_has(
+        normalized,
+        [
+            "las escribo",
+            "lo escribo",
+            "la escribo",
+            "escribo aqui",
+            "escribir aqui",
+        ],
+    ):
+        add("descarga_mental")
+    if _stable_demo_has(normalized, ["5 4 3", "54321", "cinco sentidos", "grounding"]):
+        add("grounding_54321")
+    if _stable_demo_has(normalized, ["temporizador", "timer", "2 minutos", "dos minutos"]):
+        add("temporizador")
+    if _stable_demo_has(normalized, ["que digo", "quÃ© digo", "frase", "que le digo", "quÃ© le digo"]):
+        add("frase_literal", "comunicacion_concreta", "titulo_feo")
+    if _stable_demo_has(normalized, ["rutina visual", "visual"]):
+        add("rutina_visual")
+    if _stable_demo_has(normalized, ["estimulos", "estÃ­mulos", "ruido", "luz", "sensorial"]):
+        add("reduccion_sensorial", "bajar_estimulos", "entorno")
+    if _stable_demo_has(normalized, ["distancia", "espacio seguro", "segura", "seguro"]):
+        add("distancia_segura", "seguridad_entorno")
+    if _stable_demo_has(normalized, ["opciones", "tres opciones"]):
+        add("tres_opciones")
+    if _stable_demo_has(normalized, ["abrir archivo", "abre el archivo", "abrir material"]):
+        add("abrir_material")
+    if route_id == "bloqueo_ejecutivo" and _stable_demo_has(
+        normalized,
+        [
+            "no tengo archivo",
+            "no hay archivo",
+            "sin archivo",
+            "archivo que abrir",
+        ],
+    ):
+        add("titulo_feo", "primer_movimiento")
+
+    return requested
+
+
+def _stable_demo_select_intervention(
+    route_id: str,
+    normalized: str,
+    step_index: int,
+    used_interventions: Dict[str, List[str]],
+    recent_interventions: Dict[str, List[str]],
+    previous_intervention: Optional[str],
+    exhausted_strategies: Optional[Dict[str, List[str]]] = None,
+    support_subject: str = "unknown",
+    support_mode: str = "supportive",
+    explicit_intervention_ids: Optional[List[str]] = None,
+    overthinking_blocked: bool = False,
+    variant_seed: Optional[str] = None,
+) -> Dict[str, Any]:
+    bank = INTERVENTION_BANK.get(route_id) or {}
+    if not bank:
+        return {
+            "intervention_id": None,
+            "response_text": "",
+            "used_interventions": used_interventions,
+            "used_interventions_last_10": recent_interventions,
+        }
+
+    order = list(bank.keys())
+    preferred = [
+        key
+        for key in _stable_demo_preferred_interventions(
+            route_id,
+            normalized,
+            support_subject=support_subject,
+            support_mode=support_mode,
+        )
+        if key in bank
+    ]
+    explicit_preferred = [
+        key
+        for key in (explicit_intervention_ids or [])
+        if key in bank
+    ]
+    candidates = (
+        explicit_preferred
+        + [key for key in preferred if key not in explicit_preferred]
+        + [key for key in order if key not in preferred and key not in explicit_preferred]
+    )
+    if route_id == "apoyo_infancia_neurodivergente" and (
+        overthinking_blocked or not _stable_demo_explicit_overthinking_marker(normalized)
+    ):
+        overthinking_only = {"sobrepensamiento", "pensamientos_intrusivos"}
+        filtered_candidates = [key for key in candidates if key not in overthinking_only]
+        if filtered_candidates:
+            candidates = filtered_candidates
+    if route_id == "sueno" and overthinking_blocked:
+        overthinking_sleep = {"mente_acelerada", "pensamientos_intrusivos"}
+        filtered_candidates = [key for key in candidates if key not in overthinking_sleep]
+        if filtered_candidates:
+            candidates = filtered_candidates
+    exhausted_for_route = {
+        str(item or "").strip()
+        for item in (exhausted_strategies or {}).get(route_id, []) or []
+        if str(item or "").strip()
+    }
+    if exhausted_for_route:
+        non_exhausted_candidates = [key for key in candidates if key not in exhausted_for_route]
+        if non_exhausted_candidates:
+            candidates = non_exhausted_candidates
+    if (
+        step_index == 0
+        and _stable_demo_quick_button_message(normalized)
+        and not explicit_preferred
+        and len(candidates) > 1
+    ):
+        rotation_window = min(len(candidates), 3)
+        offset = _stable_demo_variant_offset(
+            f"{variant_seed or ''}:{route_id}:{normalized}",
+            rotation_window,
+        )
+        if offset:
+            candidates = candidates[offset:] + candidates[:offset]
+
+    used_for_route = list(used_interventions.get(route_id, []) or [])
+    exhausted = bool(order) and all(key in used_for_route for key in order)
+    effective_used = [] if exhausted else used_for_route
+    recent_for_route = list(recent_interventions.get(route_id, []) or [])[-STABLE_DEMO_RECENT_WINDOW:]
+    recent_to_avoid = set(recent_for_route[-STABLE_DEMO_RECENT_AVOID_WINDOW:])
+    explicit_requested = set(explicit_preferred)
+
+    selected = None
+    for key in candidates:
+        if (
+            (key != previous_intervention or key in explicit_requested)
+            and (key not in recent_to_avoid or key in explicit_requested)
+            and (key not in effective_used or key in explicit_requested)
+        ):
+            selected = key
+            break
+
+    if selected is None:
+        selected = next(
+            (
+                key
+                for key in candidates
+                if key != previous_intervention and key not in recent_to_avoid
+            ),
+            None,
+        )
+
+    if selected is None:
+        selected = next((key for key in candidates if key != previous_intervention), None)
+
+    if selected is None:
+        rotated = candidates[step_index % len(candidates)] if candidates else None
+        selected = rotated or order[0]
+
+    next_used_for_route = [] if exhausted else used_for_route
+    if selected not in next_used_for_route:
+        next_used_for_route.append(selected)
+
+    next_used = dict(used_interventions)
+    next_used[route_id] = next_used_for_route
+    next_recent = _stable_demo_update_recent_interventions(
+        recent_interventions=recent_interventions,
+        route_id=route_id,
+        intervention_id=selected,
+    )
+
+    return {
+        "intervention_id": selected,
+        "response_text": bank[selected],
+        "used_interventions": next_used,
+        "used_interventions_last_10": next_recent,
+    }
+
+
+def _stable_demo_detect_route(message: str, previous_frame: Optional[Dict[str, Any]]) -> Optional[str]:
+    normalized = _stable_demo_normalize(message)
+    previous_route = _stable_demo_previous_route(previous_frame)
+    support_subject = _stable_demo_detect_subject(message, previous_frame, previous_route)
+    explicit_escalation = _stable_demo_explicit_escalation(normalized)
+    overthinking_block_active = _stable_demo_overthinking_block_remaining(previous_frame) > 0
+    preventive_request = _stable_demo_has(
+        normalized,
+        [
+            "prevenir",
+            "prevencion",
+            "preventivo",
+            "para que no",
+            "antes de que",
+            "anticipar",
+            "anticipacion",
+            "plan",
+            "senales tempranas",
+        ],
+    )
+    previous_pre_medication_route = str((previous_frame or {}).get("pre_medication_route_id") or "").strip()
+
+    non_pharmacological = _stable_demo_has(
+        normalized,
+        [
+            "medida no farmacologica",
+            "no farmacologico",
+            "no farmacologica",
+            "sin medicamento",
+            "sin pastilla",
+            "sin farmaco",
+        ],
+    )
+    asks_medication = _stable_demo_has(
+        normalized,
+        [
+            "medicamento",
+            "medicamentos",
+            "medicina",
+            "pastilla",
+            "pastillas",
+            "dosis",
+            "que tomo",
+            "que me tomo",
+            "que pastilla",
+            "que le doy",
+            "recetame",
+            "algo para dormir",
+            "algo para calmarme",
+            "algo para la ansiedad",
+        ],
+    )
+    if asks_medication and not non_pharmacological:
+        return "medicacion"
+    if non_pharmacological and previous_pre_medication_route in STABLE_DEMO_STEPS:
+        return previous_pre_medication_route
+
+    if _stable_demo_has(
+        normalized,
+        [
+            "quien eres",
+            "quien sos",
+            "como te llamo",
+            "como puedo llamarte",
+            "tu nombre",
+            "que puedes hacer",
+            "para que sirves",
+            "puedo hablar contigo",
+            "puedo platicar contigo",
+        ],
+    ):
+        return "meta"
+
+    if _stable_demo_anxiety_crisis_marker(normalized):
+        return "ansiedad"
+
+    if _stable_demo_has_child_marker(normalized) and _stable_demo_has(
+        normalized,
+        [
+            "crisis es de mi hijo",
+            "crisis es de mi hija",
+            "la crisis es de mi hijo",
+            "la crisis es de mi hija",
+            "crisis de mi hijo",
+            "crisis de mi hija",
+            "crisis de mis hijos",
+            "crisis de mis hijas",
+            "mi hijo esta en crisis",
+            "mi hija esta en crisis",
+            "mi hijo esta en una crisis",
+            "mi hija esta en una crisis",
+        ],
+    ):
+        return "crisis"
+
+    if support_subject in {"child", "teen_child"} and _stable_demo_child_aggression_marker(normalized):
+        return "crisis"
+
+    if _stable_demo_has(
+        normalized,
+        [
+            "no es sobrepensamiento es sueno",
+            "no es sobrepensamiento es sue o",
+            "no es sobrepensamiento es dormir",
+        ],
+    ):
+        return "sueno"
+
+    if _stable_demo_has(
+        normalized,
+        [
+            "no es sobrepensamiento es crisis",
+            "no es una crisis de sobrepensamiento",
+            "no es sobrepensamiento la crisis",
+        ],
+    ):
+        return "crisis"
+
+    if _stable_demo_has(normalized, ["no es ansiedad es sueno", "no es ansiedad es sue o", "no es ansiedad es dormir", "el problema es dormir", "el problema es sueno", "el problema es sue o"]):
+        return "sueno"
+    if _stable_demo_has(normalized, ["no es crisis es ansiedad", "no es sueno es ansiedad", "el problema es ansiedad"]):
+        return "ansiedad"
+    if _stable_demo_has(normalized, ["no es ansiedad es crisis", "hay crisis", "esta ocurriendo una crisis"]):
+        return "crisis"
+    if _stable_demo_has(
+        normalized,
+        [
+            "el problema es mi hija",
+            "el problema es mi hijo",
+            "el problema son mis hijos",
+            "el problema son mis hijas",
+            "no soy yo es mi hija",
+            "no soy yo es mi hijo",
+            "no es mio es mi hija",
+            "no es mio es mi hijo",
+        ],
+    ):
+        return "apoyo_infancia_neurodivergente"
+
+    if preventive_request and not explicit_escalation:
+        if support_subject in {"child", "teen_child", "family"}:
+            return "apoyo_infancia_neurodivergente"
+        if support_subject == "caregiver":
+            return "sobrecarga_cuidador"
+        if _stable_demo_has_sleep_marker(normalized):
+            return "sueno"
+        if _stable_demo_has_executive_marker(normalized):
+            return "bloqueo_ejecutivo"
+        if previous_route and previous_route != "crisis":
+            return previous_route
+        return "ansiedad"
+
+    if support_subject in {"child", "teen_child"} and _stable_demo_has_sleep_marker(normalized) and not explicit_escalation:
+        return "apoyo_infancia_neurodivergente"
+
+    if support_subject in {"child", "teen_child"} and previous_route == "sueno" and not explicit_escalation:
+        return "sueno"
+
+    if support_subject == "caregiver" and not _stable_demo_has_sleep_marker(normalized) and not explicit_escalation:
+        return "sobrecarga_cuidador"
+
+    if _stable_demo_has_executive_marker(normalized) and not explicit_escalation:
+        return "bloqueo_ejecutivo"
+
+    if _stable_demo_has_sleep_marker(normalized) and not explicit_escalation:
+        if support_subject in {"child", "teen_child"}:
+            return "apoyo_infancia_neurodivergente"
+        return "sueno"
+
+    behavioral_escalation = _stable_demo_has(
+        normalized,
+        [
+            "esta gritando",
+            "no lo puedo calmar",
+            "no la puedo calmar",
+            "esta fuera de control",
+            "no se puede controlar",
+        ],
+    ) and not _stable_demo_has_sleep_marker(normalized)
+
+    if explicit_escalation or behavioral_escalation:
+        return "crisis"
+    if _stable_demo_has(
+        normalized,
+        [
+            "mi hijo",
+            "mi hija",
+            "mis hijos",
+            "mis hijas",
+            "mi nino",
+            "mi nina",
+            "mi niño",
+            "mi niña",
+            "triple excepcionalidad",
+            "doble excepcionalidad",
+            "altas capacidades",
+            "aacc",
+            "tea",
+            "tdah",
+            *([] if overthinking_block_active else ["sobrepensamiento", "sobrepiensa"]),
+        ],
+    ):
+        return "apoyo_infancia_neurodivergente"
+    if previous_route == "apoyo_infancia_neurodivergente" and _stable_demo_has(
+        normalized,
+        [
+            "dormir",
+            "duerman",
+            "duerme",
+            "los ayudo",
+            "las ayudo",
+            "ayudarlos",
+            "ayudarlas",
+            "como los ayudo",
+            "cómo los ayudo",
+        ],
+    ):
+        return "apoyo_infancia_neurodivergente"
+    if _stable_demo_has(
+        normalized,
+        [
+            "sueno",
+            "sue o",
+            "dormir",
+            "duermo",
+            "duerme",
+            "insomnio",
+            "desvelo",
+            "no descanso",
+            "problemas de sueno",
+            "problemas de sue o",
+        ],
+    ):
+        return "sueno"
+    if _stable_demo_has(
+        normalized,
+        [
+            "bloqueo",
+            "bloqueada",
+            "bloqueado",
+            "no puedo organizarme",
+            "organizarme",
+            "no puedo empezar",
+            "me cuesta arrancar",
+            "abrir archivo",
+            "temporizador",
+            "tarea",
+        ],
+    ):
+        return "bloqueo_ejecutivo"
+    if previous_route in {"sueno", "crisis", "bloqueo_ejecutivo", "apoyo_infancia_neurodivergente", "sobrecarga_cuidador"} and _stable_demo_has(
+        normalized,
+        [
+            "ansiedad",
+            "ansiosa",
+            "ansioso",
+            "me siento ansiosa",
+            "me siento ansioso",
+            "preocupacion",
+            "preocupa",
+            "mente acelerada",
+        ],
+    ):
+        return previous_route
+    if _stable_demo_has(
+        normalized,
+        [
+            "ansiedad",
+            "ansiosa",
+            "ansioso",
+            "me siento ansiosa",
+            "me siento ansioso",
+            "preocupacion",
+            "preocupa",
+            "mente acelerada",
+        ],
+    ):
+        return "ansiedad"
+    if previous_route in STABLE_DEMO_ROUTE_TO_DOMAIN:
+        return previous_route
+    return None
+
+
+def _stable_demo_write_here_question(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "lo escribo aqui",
+            "la escribo aqui",
+            "las escribo aqui",
+            "escribo aqui",
+            "lo puedo escribir aqui",
+            "las puedo escribir aqui",
+            "aqui lo escribo",
+            "aqui las escribo",
+        ],
+    )
+
+
+def _stable_demo_where_to_write_question(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "donde lo escribo",
+            "en donde lo escribo",
+            "donde la escribo",
+            "donde las escribo",
+            "en que lo escribo",
+            "en que las escribo",
+            "donde escribo",
+        ],
+    )
+
+
+def _stable_demo_no_materials_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "no tengo archivo",
+            "no hay archivo",
+            "no tengo archivo que abrir",
+            "no tengo nada que abrir",
+            "no tengo nada cerca para abrir",
+            "no tengo cuaderno",
+            "no tengo hoja",
+            "no tengo papel",
+            "no tengo en que escribir",
+            "no tengo donde escribir",
+            "no tengo nada que abrir ni donde escribir",
+            "no tengo nada que abrir ni en que escribir",
+            "no tengo en donde escribir",
+        ],
+    )
+
+
+def _stable_demo_no_writing_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "no tengo ganas de escribir",
+            "no quiero escribir",
+            "no puedo escribir",
+            "no me sale escribir",
+            "no escribimos",
+        ],
+    )
+
+
+def _stable_demo_failed_previous_marker(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "eso no ha funcionado",
+            "eso no funciono",
+            "eso no funciona",
+            "no ha funcionado",
+            "no funciono",
+            "no funciona",
+            "sigue igual",
+        ],
+    )
+
+
+def _stable_demo_phrase_question(normalized: str) -> bool:
+    return _stable_demo_has(
+        normalized,
+        [
+            "que le digo",
+            "que les digo",
+            "que digo",
+            "como le digo",
+            "como les digo",
+            "que frase",
+            "cual frase",
+        ],
+    )
+
+
+def _stable_demo_build_direct_turn_response(
+    *,
+    route_id: str,
+    normalized: str,
+    support_subject: str,
+    support_mode: str,
+    previous_frame: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, str]]:
+    previous_intervention = _stable_demo_previous_intervention(previous_frame)
+
+    child_crisis_correction = _stable_demo_has(
+        normalized,
+        [
+            "la crisis es de mi hijo",
+            "la crisis es de mi hija",
+            "crisis de mi hijo",
+            "crisis de mi hija",
+        ],
+    )
+    child_aggression = _stable_demo_child_aggression_marker(normalized)
+    if support_subject in {"child", "teen_child"} and child_crisis_correction and not child_aggression:
+        return {
+            "turn_family": "safety_clarification",
+            "response_text": (
+                "Gracias por aclararlo. Me centro en tu hijo: ahora la prioridad es seguridad y baja demanda, no razonar mucho. "
+                "Baja ruido o gente cerca, manten distancia segura y usa pocas palabras. Si aparece riesgo de golpearse o lastimar a alguien, retira objetos peligrosos y pide apoyo presencial."
+            ),
+        }
+
+    if support_subject in {"child", "teen_child"} and child_aggression:
+        return {
+            "turn_family": "safety_clarification",
+            "response_text": (
+                "Gracias por aclararlo. Si tu hijo esta gritando o quiere golpear, ahora la prioridad es seguridad fisica: "
+                "separa a su papa si puedes, retira objetos que puedan lastimar y no intentes razonar con el en este momento. "
+                "Usa pocas palabras: 'Estoy aqui. Vamos a darte espacio'. Si hay riesgo inmediato de dano, pide apoyo presencial o servicios de emergencia."
+            ),
+        }
+
+    if route_id == "bloqueo_ejecutivo" and (
+        _stable_demo_timer_done_marker(normalized)
+        or (
+            previous_intervention == "temporizador"
+            and _stable_demo_has(normalized, ["ya lo hice", "listo", "hecho"])
+        )
+    ):
+        return {
+            "turn_family": "post_action_followup",
+            "response_text": "Bien. Ahora el siguiente paso es elegir una sola linea de inicio: titulo, fecha o primera frase minima.",
+        }
+
+    if (
+        route_id in {"sueno", "apoyo_infancia_neurodivergente"}
+        and _stable_demo_has_sleep_marker(normalized)
+        and _stable_demo_has(
+            normalized,
+            [
+                "dame una actividad",
+                "actividad para dormir",
+                "que actividad",
+                "una actividad",
+                "algo tranquilo para dormir",
+            ],
+        )
+    ):
+        return {
+            "turn_family": "direct_question",
+            "response_text": (
+                "Prueba una actividad baja en demanda durante 10 a 15 minutos: musica tranquila, lectura ligera o ducha tibia, con luz baja y sin conversaciones intensas. "
+                "El objetivo no es dormir a la fuerza; es bajar el cuerpo un poco."
+            ),
+        }
+
+    if _stable_demo_negates_overthinking(normalized) and _stable_demo_has_sleep_marker(normalized):
+        if support_subject in {"child", "teen_child"}:
+            return {
+                "turn_family": "domain_correction",
+                "response_text": (
+                    "Tienes razon, me centro en sueno. Con adolescentes suele funcionar mejor negociar antes, no en plena noche: "
+                    "pantalla cargando fuera del cuarto, luz baja y una actividad tranquila de 10 a 15 minutos, como musica suave, lectura ligera o ducha tibia. "
+                    "Si no aceptan todo, empieza por una sola cosa: pantalla fuera de la cama."
+                ),
+            }
+        return {
+            "turn_family": "domain_correction",
+            "response_text": (
+                "Tienes razon, me centro en sueno. Si bajar luz no alcanzo, prueba una medida mas concreta: pantalla lejos de la cama, poca luz y una actividad baja en demanda durante 10 a 15 minutos. "
+                "El objetivo no es forzar dormir, es bajar activacion."
+            ),
+        }
+
+    if _stable_demo_negates_overthinking(normalized) and route_id == "crisis":
+        return {
+            "turn_family": "domain_correction",
+            "response_text": (
+                "Tienes razon, no lo trato como sobrepensamiento. Si es crisis, ahora va seguridad primero: baja demandas alrededor, usa pocas palabras y manten distancia segura. "
+                "Si hay riesgo de dano, retira objetos peligrosos y pide apoyo presencial."
+            ),
+        }
+
+    if _stable_demo_write_here_question(normalized):
+        return {
+            "turn_family": "direct_question",
+            "response_text": "Si, puedes escribirlo aqui si quieres. Puede ser solo una linea; no tiene que estar completa.",
+        }
+
+    if _stable_demo_where_to_write_question(normalized):
+        return {
+            "turn_family": "direct_question",
+            "response_text": "Puede ser aqui mismo. Si prefieres no ponerlo en el chat, puede ser una nota cualquiera; basta una sola linea.",
+        }
+
+    if _stable_demo_no_writing_marker(normalized):
+        if route_id == "bloqueo_ejecutivo":
+            return {
+                "turn_family": "materials_blocked",
+                "response_text": "Entonces no escribimos todavia. Di en voz alta el nombre de la tarea y elige solo el primer verbo: leer, buscar, escribir o revisar.",
+            }
+        return {
+            "turn_family": "materials_blocked",
+            "response_text": "Entonces no escribimos. Dilo en voz baja o nombralo mentalmente: 'lo que mas pesa es...'. Con eso basta por ahora.",
+        }
+
+    if _stable_demo_no_materials_marker(normalized):
+        if _stable_demo_has(normalized, ["abrir"]) and _stable_demo_has(normalized, ["escribir"]):
+            text = (
+                "Entonces el primer paso no sera abrir ni escribir. Hazlo fisico: sientate en el lugar donde trabajarias "
+                "o di en voz alta: 'voy a empezar por tesis'."
+            )
+        elif _stable_demo_has(normalized, ["escribir", "hoja", "cuaderno", "papel"]):
+            if route_id == "bloqueo_ejecutivo":
+                text = "No necesitas escribir todavia. Di en voz alta el nombre de la tarea y elige solo el primer verbo: leer, buscar, escribir o revisar."
+            else:
+                text = "Entonces no escribimos. Dilo en voz baja o nombralo mentalmente: 'lo que mas pesa es...'. Con eso basta por ahora."
+        else:
+            text = (
+                "No necesitas tener archivo abierto. Empieza por una accion sin material: di en voz alta 'tengo que iniciar tesis' "
+                "y elige solo el primer verbo: leer, buscar, escribir o revisar."
+            )
+        return {
+            "turn_family": "materials_blocked",
+            "response_text": text,
+        }
+
+    if _stable_demo_phrase_question(normalized):
+        if route_id == "crisis" and support_subject in {"child", "teen_child"}:
+            return {
+                "turn_family": "literal_phrase_request",
+                "response_text": (
+                    "Dile una frase corta, sin explicar demasiado: 'Estoy aqui. Vamos a darte espacio. No voy a discutir ahora'. "
+                    "Despues vuelve a seguridad: distancia, objetos fuera y menos gente cerca."
+                ),
+            }
+        if route_id == "crisis":
+            return {
+                "turn_family": "literal_phrase_request",
+                "response_text": "Puedes decir solo esto: 'Estoy aqui. No tenemos que resolverlo ahora. Vamos a bajar esto'. Luego guarda silencio unos segundos.",
+            }
+        if support_subject in {"child", "teen_child"}:
+            return {
+                "turn_family": "literal_phrase_request",
+                "response_text": "Puedes decirle: 'Vamos con una sola cosa ahora. No tenemos que resolver todo en este momento'. Dilo bajo y sin agregar otra instruccion.",
+            }
+        return {
+            "turn_family": "literal_phrase_request",
+            "response_text": "Puedes decirlo asi: 'Ahora solo necesito empezar por una cosa pequena'. No hace falta explicarlo perfecto.",
+        }
+
+    if _stable_demo_has(normalized, ["como consigo eso", "como consigo ayuda", "como consigo apoyo"]):
+        return {
+            "turn_family": "direct_question",
+            "response_text": (
+                "Consiguelo por la via mas cercana, no la perfecta: alguien en casa, un familiar, una vecina, seguridad del lugar o servicios de emergencia si hay riesgo inmediato. "
+                "El mensaje puede ser: 'Necesito apoyo presencial ahora; hay riesgo de que alguien salga lastimado'."
+            ),
+        }
+
+    if _stable_demo_failed_previous_marker(normalized):
+        if route_id == "sueno" or (
+            route_id == "apoyo_infancia_neurodivergente"
+            and support_subject in {"child", "teen_child"}
+            and support_mode != "acute"
+        ):
+            return {
+                "turn_family": "strategy_rejection",
+                "response_text": (
+                    "Tienes razon, entonces cambiamos sin salirnos de sueno. No lo negocies en plena noche: manana pacta algo concreto, "
+                    "pantalla fuera del cuarto a una hora acordada y una actividad tranquila de 10 a 15 minutos. Si esto se repite mucho, conviene revisarlo con un profesional."
+                ),
+            }
+        if route_id == "crisis":
+            return {
+                "turn_family": "strategy_rejection",
+                "response_text": (
+                    "Si eso no funciono y sigue habiendo riesgo, sube la prioridad a seguridad: mas distancia, separa a quien pueda salir lastimado, retira objetos peligrosos "
+                    "y pide apoyo presencial. Ahora no toca convencer; toca proteger."
+                ),
+            }
+        if route_id == "bloqueo_ejecutivo":
+            return {
+                "turn_family": "strategy_rejection",
+                "response_text": "Entonces no abrimos archivo ni escribimos. Haz una entrada sin material: di en voz alta el nombre de la tarea y elige solo el primer verbo: leer, buscar, escribir o revisar.",
+            }
+        if route_id == "ansiedad":
+            return {
+                "turn_family": "strategy_rejection",
+                "response_text": "Entonces no insistimos por ahi. Si escribir no ayudo, bajalo a voz o mente: nombra solo 'lo que mas pesa es...' y no intentes resolverlo todavia.",
+            }
+
+    return None
+
+
+def _stable_demo_turn_family(message: str, previous_route: Optional[str], route_id: str) -> str:
+    normalized = _stable_demo_normalize(message)
+    if route_id == "meta":
+        return "meta_question"
+    if route_id == "medicacion":
+        return "specific_action_request"
+    if previous_route and previous_route != route_id:
+        return "domain_shift"
+    if _stable_demo_has(normalized, ["ya lo hice", "listo", "hecho"]):
+        return "post_action_followup"
+    if _stable_demo_has(normalized, ["eso ya me lo dijiste", "eso ya lo dijiste", "repites", "estas repitiendo", "estás repitiendo"]):
+        return "post_action_followup"
+    if _stable_demo_wants_another(normalized) or _stable_demo_has(
+        normalized,
+        [
+            "dime que hago",
+            "que hago",
+            "dime una medida",
+            "pero dime",
+            "ensename a meditar",
+            "enseñame a meditar",
+        ],
+    ):
+        return "followup_acceptance"
+    if previous_route == route_id:
+        return "followup_acceptance"
+    return "new_request"
+
+
+def stable_demo_response(
+    message: str,
+    previous_frame: Optional[Dict[str, Any]],
+    chat_history: Optional[List[Dict[str, Any]]] = None,
+    variant_seed: Optional[str] = None,
+) -> Dict[str, Any]:
+    route_id = _stable_demo_detect_route(message, previous_frame)
+    if route_id not in STABLE_DEMO_ROUTE_TO_DOMAIN:
+        return {"handled": False}
+
+    normalized = _stable_demo_normalize(message)
+    previous_route = _stable_demo_previous_route(previous_frame)
+    previous_step = _stable_demo_previous_step(previous_frame)
+    previous_intervention = _stable_demo_previous_intervention(previous_frame)
+    used_interventions = _stable_demo_used_interventions(previous_frame)
+    used_interventions_last_10 = _stable_demo_recent_interventions(previous_frame)
+    exhausted_strategies = _stable_demo_exhausted_strategies(previous_frame)
+    support_subject = _stable_demo_detect_subject(message, previous_frame, route_id)
+    support_mode = _stable_demo_detect_mode(message, previous_frame, route_id, support_subject)
+    turn_family = _stable_demo_turn_family(message, previous_route, route_id)
+    intervention_id = None
+    overthinking_negated = _stable_demo_negates_overthinking(normalized)
+    previous_overthinking_block = _stable_demo_overthinking_block_remaining(previous_frame)
+    overthinking_blocked = bool(overthinking_negated or previous_overthinking_block > 0)
+    next_overthinking_block = (
+        STABLE_DEMO_OVERTHINKING_BLOCK_TURNS
+        if overthinking_negated
+        else max(previous_overthinking_block - 1, 0)
+    )
+    direct_turn = _stable_demo_build_direct_turn_response(
+        route_id=route_id,
+        normalized=normalized,
+        support_subject=support_subject,
+        support_mode=support_mode,
+        previous_frame=previous_frame,
+    )
+
+    if route_id == "medicacion":
+        response_text = (
+            "No puedo decirte qué medicamento tomar ni recomendar dosis. "
+            "Si el sueño o la ansiedad están afectando mucho, lo más seguro es consultarlo con un profesional de salud. "
+            "Sí puedo ayudarte con una medida no farmacológica."
+        )
+        step_index = 0
+    elif route_id == "meta":
+        response_text = "Soy NeuroGuIA. Estoy aquí para acompañar, ordenar lo que pasa y ayudarte a encontrar un paso claro."
+        if _stable_demo_has(normalized, ["como puedo llamarte", "como te llamo", "tu nombre"]):
+            response_text = "Puedes llamarme NeuroGuIA."
+        elif _stable_demo_has(normalized, ["que puedes hacer", "para que sirves"]):
+            response_text = "Puedo ayudarte a ordenar lo que está pasando y darte un siguiente paso claro, breve y seguro."
+        elif _stable_demo_has(normalized, ["puedo hablar contigo", "puedo platicar contigo"]):
+            response_text = "Sí. Puedes hablar conmigo aquí; te respondo con pasos claros y cuidado."
+        step_index = 0
+    elif direct_turn:
+        turn_family = str(direct_turn.get("turn_family") or "direct_question")
+        response_text = str(direct_turn.get("response_text") or "").strip()
+        step_index = previous_step if previous_route == route_id else 0
+        intervention_id = previous_intervention if previous_route == route_id else None
+    else:
+        same_route = previous_route == route_id
+        if same_route or (
+            previous_route
+            and turn_family in {"followup_acceptance", "post_action_followup"}
+        ):
+            step_index = previous_step + 1
+        else:
+            step_index = 0
+
+        selection_normalized = normalized
+        previous_child_sleep = previous_intervention in {
+            "sueno_infancia",
+            "teen_sueno_activacion_cognitiva",
+            "teen_rutina_baja_demanda",
+            "teen_descompresion_sensorial",
+            "teen_ansiedad_anticipatoria",
+        }
+        if (
+            route_id == "apoyo_infancia_neurodivergente"
+            and support_subject == "teen_child"
+            and (previous_route == "sueno" or previous_child_sleep)
+            and not _stable_demo_has_sleep_marker(normalized)
+        ):
+            selection_normalized = f"{normalized} sueno dormir"
+
+        selection = _stable_demo_select_intervention(
+            route_id=route_id,
+            normalized=selection_normalized,
+            step_index=step_index,
+            used_interventions=used_interventions,
+            recent_interventions=used_interventions_last_10,
+            previous_intervention=previous_intervention if same_route else None,
+            exhausted_strategies=exhausted_strategies,
+            support_subject=support_subject,
+            support_mode=support_mode,
+            explicit_intervention_ids=_stable_demo_explicit_intervention_requests(route_id, selection_normalized),
+            overthinking_blocked=overthinking_blocked,
+            variant_seed=variant_seed,
+        )
+        intervention_id = selection.get("intervention_id")
+        response_text = str(selection.get("response_text") or "").strip()
+        used_interventions = dict(selection.get("used_interventions") or used_interventions)
+        used_interventions_last_10 = dict(
+            selection.get("used_interventions_last_10") or used_interventions_last_10
+        )
+        if same_route and _stable_demo_wants_pause(normalized):
+            turn_family = "closure_or_pause"
+            intervention_id = None
+            response_text = "Aquí podemos pausar. Si necesitas seguir, seguimos desde aquí."
+            used_interventions = _stable_demo_used_interventions(previous_frame)
+            used_interventions_last_10 = _stable_demo_recent_interventions(previous_frame)
+
+        if _stable_demo_repeat_complaint(normalized):
+            response_text = f"Tienes razón. No repito esa vía. Probemos otra. {response_text}"
+        elif _stable_demo_has(normalized, ["no me sirve", "eso no me sirve", "otra cosa"]):
+            response_text = f"Probemos otra vía. {response_text}"
+
+        response_text = _stable_demo_apply_emotional_close(
+            response_text=response_text,
+            route_id=route_id,
+            normalized=normalized,
+            turn_family=turn_family,
+            step_index=step_index,
+            support_subject=support_subject,
+            support_mode=support_mode,
+        )
+
+    conversation_domain = STABLE_DEMO_ROUTE_TO_DOMAIN[route_id]
+    support_goal = STABLE_DEMO_GOALS.get(route_id, "clarify_and_support")
+    conversation_phase = STABLE_DEMO_PHASES.get(route_id, "stable_demo")
+    max_steps = len(STABLE_DEMO_STEPS.get(route_id, [""])) or 1
+    pre_medication_route_id = None
+    pre_medication_step_index = None
+    if route_id == "medicacion":
+        detected_context_route = None
+        if _stable_demo_has(normalized, ["dormir", "sueno", "insomnio", "desvelo"]):
+            detected_context_route = "sueno"
+        elif _stable_demo_has(normalized, ["ansiedad", "ansiosa", "ansioso", "calmarme"]):
+            detected_context_route = "ansiedad"
+        pre_medication_route_id = previous_route if previous_route in STABLE_DEMO_STEPS else detected_context_route
+        pre_medication_step_index = previous_step if pre_medication_route_id == previous_route else 0
+
+    conversation_frame = {
+        "conversation_domain": conversation_domain,
+        "support_goal": support_goal,
+        "conversation_phase": conversation_phase,
+        "speaker_role": (previous_frame or {}).get("speaker_role") or "usuario",
+        "care_context": {
+            "stable_demo": True,
+            "previous_route_id": previous_route,
+            "previous_step_index": previous_step,
+            "last_intervention_id": intervention_id,
+            "support_subject": support_subject,
+            "support_mode": support_mode,
+            "overthinking_block_turns": next_overthinking_block,
+            "overthinking_block_active": overthinking_blocked,
+            "exhausted_strategies": exhausted_strategies,
+        },
+        "continuity_score": 0.96 if previous_route == route_id else 0.62,
+        "source_message": message,
+        "effective_message": message,
+        "turn_type": turn_family,
+        "turn_family": turn_family,
+        "route_id": route_id,
+        "support_subject": support_subject,
+        "support_mode": support_mode,
+        "stable_demo_routing_key": f"{route_id}:{support_subject}:{support_mode}",
+        "stable_demo_route_id": route_id,
+        "step_index": step_index,
+        "stable_demo_step_index": step_index,
+        "stable_demo_intervention_id": intervention_id,
+        "last_intervention_id": intervention_id,
+        "direct_turn_response": bool(direct_turn),
+        "overthinking_block_turns": next_overthinking_block,
+        "overthinking_block_active": overthinking_blocked,
+        "exhausted_strategies": exhausted_strategies,
+        "used_interventions": used_interventions,
+        "used_interventions_last_10": used_interventions_last_10,
+        "max_steps": max_steps,
+        "stable_demo": True,
+        "phase_progression_reason": "stable_demo_counter",
+        "last_guided_action": response_text,
+        "last_action_instruction": response_text,
+        "last_action_type": "stable_demo_step",
+        "intervention_level": 1,
+        "domain_shift_detected": bool(previous_route and previous_route != route_id),
+        "domain_shift_analysis": {
+            "detected": bool(previous_route and previous_route != route_id),
+            "previous_route_id": previous_route,
+            "route_id": route_id,
+        },
+        "support_flow_state": {
+            "active": False,
+            "handled_by": "stable_demo_response",
+            "route_id": route_id,
+            "active_route_id": route_id if route_id in STABLE_DEMO_STEPS else None,
+            "support_subject": support_subject,
+            "support_mode": support_mode,
+            "stable_demo_routing_key": f"{route_id}:{support_subject}:{support_mode}",
+            "conversation_domain": conversation_domain,
+            "step_index": step_index,
+            "max_steps": max_steps,
+            "last_intervention_id": intervention_id,
+            "direct_turn_response": bool(direct_turn),
+            "overthinking_block_turns": next_overthinking_block,
+            "overthinking_block_active": overthinking_blocked,
+            "exhausted_strategies": exhausted_strategies,
+            "used_interventions": used_interventions,
+            "used_interventions_last_10": used_interventions_last_10,
+        },
+    }
+    if pre_medication_route_id:
+        conversation_frame["pre_medication_route_id"] = pre_medication_route_id
+        conversation_frame["pre_medication_step_index"] = pre_medication_step_index
+
+    behavioral_plan = _stable_demo_build_behavioral_plan(
+        route_id=route_id,
+        support_subject=support_subject,
+        support_mode=support_mode,
+        intervention_id=intervention_id,
+        response_text=response_text,
+        message=message,
+        previous_frame=previous_frame,
+        chat_history=chat_history,
+        turn_family=turn_family,
+        step_index=step_index,
+    )
+    if direct_turn:
+        behavioral_plan["conversation_priority"] = "answer_current_user_turn"
+        behavioral_plan["must_answer_current_question_first"] = True
+        behavioral_plan["do_not_advance_intervention"] = True
+        behavioral_plan["current_turn_task"] = "Responder la pregunta o aclaracion concreta del usuario y no avanzar la plantilla."
+    if overthinking_blocked:
+        behavioral_plan["blocked_interventions"] = {
+            "sobrepensamiento": next_overthinking_block,
+        }
+    conversation_frame["behavioral_plan"] = behavioral_plan
+    conversation_frame["support_flow_state"]["behavioral_plan"] = behavioral_plan
+
+    return {
+        "handled": True,
+        "response_text": response_text,
+        "behavioral_plan": behavioral_plan,
+        "route_id": route_id,
+        "support_subject": support_subject,
+        "support_mode": support_mode,
+        "stable_demo_routing_key": f"{route_id}:{support_subject}:{support_mode}",
+        "step_index": step_index,
+        "intervention_id": intervention_id,
+        "used_interventions": used_interventions,
+        "used_interventions_last_10": used_interventions_last_10,
+        "exhausted_strategies": exhausted_strategies,
+        "turn_family": turn_family,
+        "direct_turn_response": bool(direct_turn),
+        "overthinking_block_turns": next_overthinking_block,
+        "overthinking_block_active": overthinking_blocked,
+        "conversation_frame": conversation_frame,
+    }
+
+
+def stable_demo_repair_response(
+    message: str,
+    previous_frame: Optional[Dict[str, Any]],
+    repair: Dict[str, Any],
+    chat_history: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    if not repair.get("handled"):
+        return {"handled": False}
+
+    previous_route = _stable_demo_previous_route(previous_frame)
+    repair_route = str(repair.get("route_id") or "").strip()
+    route_id = repair_route or previous_route or "meta"
+    if route_id not in STABLE_DEMO_ROUTE_TO_DOMAIN:
+        route_id = previous_route if previous_route in STABLE_DEMO_ROUTE_TO_DOMAIN else "meta"
+
+    normalized = _stable_demo_normalize(message)
+    previous_step = _stable_demo_previous_step(previous_frame)
+    previous_intervention = _stable_demo_previous_intervention(previous_frame)
+    used_interventions = _stable_demo_used_interventions(previous_frame)
+    used_interventions_last_10 = _stable_demo_recent_interventions(previous_frame)
+    support_subject = str(repair.get("support_subject") or "").strip()
+    if support_subject not in {"self", "child", "teen_child", "caregiver", "partner", "family", "unknown"}:
+        support_subject = _stable_demo_previous_subject(previous_frame)
+    support_mode = _stable_demo_previous_mode(previous_frame)
+    if route_id == "crisis":
+        support_mode = "acute"
+    if not support_subject or support_subject == "unknown":
+        support_subject = _stable_demo_detect_subject(message, previous_frame, route_id)
+
+    do_not_advance_step = bool(repair.get("do_not_advance_step", True))
+    step_index = previous_step if do_not_advance_step else previous_step + 1
+    intervention_id = previous_intervention if do_not_advance_step else None
+    mark_strategy_exhausted = str(repair.get("mark_strategy_exhausted") or "").strip() or None
+    exhausted_strategies = _stable_demo_add_exhausted_strategy(
+        previous_frame=previous_frame,
+        route_id=previous_route or route_id,
+        strategy_id=mark_strategy_exhausted,
+    )
+    overthinking_negated = _stable_demo_negates_overthinking(normalized)
+    previous_overthinking_block = _stable_demo_overthinking_block_remaining(previous_frame)
+    next_overthinking_block = (
+        STABLE_DEMO_OVERTHINKING_BLOCK_TURNS
+        if overthinking_negated
+        else max(previous_overthinking_block - 1, 0)
+    )
+    response_text = str(repair.get("response_text") or "").strip()
+    repair_type = str(repair.get("repair_type") or "conversational_repair").strip()
+
+    conversation_domain = STABLE_DEMO_ROUTE_TO_DOMAIN[route_id]
+    support_goal = STABLE_DEMO_GOALS.get(route_id, "clarify_and_support")
+    conversation_phase = STABLE_DEMO_PHASES.get(route_id, "stable_demo")
+    max_steps = len(STABLE_DEMO_STEPS.get(route_id, [""])) or 1
+
+    conversation_frame = {
+        "conversation_domain": conversation_domain,
+        "support_goal": support_goal,
+        "conversation_phase": conversation_phase,
+        "speaker_role": (previous_frame or {}).get("speaker_role") or "usuario",
+        "care_context": {
+            "stable_demo": True,
+            "conversational_repair": True,
+            "repair_type": repair_type,
+            "previous_route_id": previous_route,
+            "previous_step_index": previous_step,
+            "last_intervention_id": intervention_id,
+            "support_subject": support_subject,
+            "support_mode": support_mode,
+            "overthinking_block_turns": next_overthinking_block,
+            "overthinking_block_active": bool(next_overthinking_block),
+            "exhausted_strategies": exhausted_strategies,
+        },
+        "continuity_score": 0.98 if previous_route == route_id else 0.7,
+        "source_message": message,
+        "effective_message": message,
+        "turn_type": repair_type,
+        "turn_family": repair_type,
+        "route_id": route_id,
+        "support_subject": support_subject,
+        "support_mode": support_mode,
+        "stable_demo_routing_key": f"{route_id}:{support_subject}:{support_mode}",
+        "stable_demo_route_id": route_id,
+        "step_index": step_index,
+        "stable_demo_step_index": step_index,
+        "stable_demo_intervention_id": intervention_id,
+        "last_intervention_id": intervention_id,
+        "conversational_repair": True,
+        "repair_type": repair_type,
+        "repair_notes": list(repair.get("notes") or []),
+        "do_not_advance_step": do_not_advance_step,
+        "mark_strategy_exhausted": mark_strategy_exhausted,
+        "exhausted_strategies": exhausted_strategies,
+        "direct_turn_response": True,
+        "overthinking_block_turns": next_overthinking_block,
+        "overthinking_block_active": bool(next_overthinking_block),
+        "used_interventions": used_interventions,
+        "used_interventions_last_10": used_interventions_last_10,
+        "max_steps": max_steps,
+        "stable_demo": True,
+        "phase_progression_reason": "conversational_repair_no_step_advance",
+        "last_guided_action": response_text,
+        "last_action_instruction": response_text,
+        "last_action_type": "conversational_repair",
+        "intervention_level": 1,
+        "domain_shift_detected": bool(previous_route and previous_route != route_id),
+        "domain_shift_analysis": {
+            "detected": bool(previous_route and previous_route != route_id),
+            "previous_route_id": previous_route,
+            "route_id": route_id,
+            "reason": repair_type,
+        },
+        "support_flow_state": {
+            "active": False,
+            "handled_by": "conversational_repair_engine",
+            "route_id": route_id,
+            "active_route_id": route_id if route_id in STABLE_DEMO_STEPS else None,
+            "support_subject": support_subject,
+            "support_mode": support_mode,
+            "stable_demo_routing_key": f"{route_id}:{support_subject}:{support_mode}",
+            "conversation_domain": conversation_domain,
+            "step_index": step_index,
+            "max_steps": max_steps,
+            "last_intervention_id": intervention_id,
+            "conversational_repair": True,
+            "repair_type": repair_type,
+            "do_not_advance_step": do_not_advance_step,
+            "mark_strategy_exhausted": mark_strategy_exhausted,
+            "exhausted_strategies": exhausted_strategies,
+            "direct_turn_response": True,
+            "overthinking_block_turns": next_overthinking_block,
+            "overthinking_block_active": bool(next_overthinking_block),
+            "used_interventions": used_interventions,
+            "used_interventions_last_10": used_interventions_last_10,
+        },
+    }
+    behavioral_plan = _stable_demo_build_behavioral_plan(
+        route_id=route_id,
+        support_subject=support_subject,
+        support_mode=support_mode,
+        intervention_id=intervention_id,
+        response_text=response_text,
+        message=message,
+        previous_frame=previous_frame,
+        chat_history=chat_history,
+        turn_family=repair_type,
+        step_index=step_index,
+    )
+    behavioral_plan["conversation_priority"] = "conversational_repair"
+    behavioral_plan["must_answer_current_question_first"] = True
+    behavioral_plan["do_not_advance_intervention"] = do_not_advance_step
+    behavioral_plan["repair_type"] = repair_type
+    behavioral_plan["repair_notes"] = list(repair.get("notes") or [])
+    behavioral_plan["current_turn_task"] = "Resolver la reparacion conversacional del ultimo mensaje sin avanzar plantilla."
+    if next_overthinking_block:
+        behavioral_plan["blocked_interventions"] = {
+            "sobrepensamiento": next_overthinking_block,
+        }
+    conversation_frame["behavioral_plan"] = behavioral_plan
+    support_state = dict(conversation_frame.get("support_flow_state") or {})
+    support_state["behavioral_plan"] = behavioral_plan
+    conversation_frame["support_flow_state"] = support_state
+
+    return {
+        "handled": True,
+        "response_text": response_text,
+        "behavioral_plan": behavioral_plan,
+        "route_id": route_id,
+        "support_subject": support_subject,
+        "support_mode": support_mode,
+        "stable_demo_routing_key": f"{route_id}:{support_subject}:{support_mode}",
+        "step_index": step_index,
+        "intervention_id": intervention_id,
+        "used_interventions": used_interventions,
+        "used_interventions_last_10": used_interventions_last_10,
+        "exhausted_strategies": exhausted_strategies,
+        "turn_family": repair_type,
+        "direct_turn_response": True,
+        "overthinking_block_turns": next_overthinking_block,
+        "overthinking_block_active": bool(next_overthinking_block),
+        "conversational_repair": True,
+        "repair_type": repair_type,
+        "repair_notes": list(repair.get("notes") or []),
+        "conversation_frame": conversation_frame,
+    }
 
 
 class NeuroGuiaOrchestratorV2:
@@ -239,6 +2697,54 @@ class NeuroGuiaOrchestratorV2:
             previous_frame=previous_frame,
         )
         effective_message = context_override.get("effective_message") or message
+        conversational_repair = resolve_conversational_repair(
+            message=message,
+            previous_frame=previous_frame,
+            recent_messages=chat_history,
+        )
+        if conversational_repair.get("handled"):
+            stable_repair = stable_demo_repair_response(
+                message=message,
+                previous_frame=previous_frame,
+                repair=conversational_repair,
+                chat_history=chat_history,
+            )
+            if stable_repair.get("handled"):
+                return self._build_stable_demo_process_result(
+                    stable_demo=stable_repair,
+                    message=message,
+                    effective_message=effective_message,
+                    previous_frame=previous_frame,
+                    context_override=context_override,
+                    unit_context=unit_context,
+                    user_context_payload=user_context_payload,
+                    user_context_store_result=user_context_store_result,
+                    conversation_curation_result=conversation_curation_result,
+                    session_scope_id=session_scope_id,
+                    chat_history=chat_history,
+                    chat_history_size=len(chat_history or []),
+                )
+        stable_demo = stable_demo_response(
+            message=message,
+            previous_frame=previous_frame,
+            chat_history=chat_history,
+            variant_seed=session_scope_id,
+        )
+        if stable_demo.get("handled"):
+            return self._build_stable_demo_process_result(
+                stable_demo=stable_demo,
+                message=message,
+                effective_message=effective_message,
+                previous_frame=previous_frame,
+                context_override=context_override,
+                unit_context=unit_context,
+                user_context_payload=user_context_payload,
+                user_context_store_result=user_context_store_result,
+                conversation_curation_result=conversation_curation_result,
+                session_scope_id=session_scope_id,
+                chat_history=chat_history,
+                chat_history_size=len(chat_history or []),
+            )
 
         # -----------------------------------------------------
         # 1) PERFIL ACTIVO
@@ -335,7 +2841,7 @@ class NeuroGuiaOrchestratorV2:
             conversation_control=conversation_control,
         )
 
-        support_flow_result = self.support_flow_engine.resolve_turn(
+        flow_result = self.support_flow_engine.resolve_turn(
             source_message=message,
             effective_message=effective_message,
             previous_frame=previous_frame,
@@ -346,16 +2852,17 @@ class NeuroGuiaOrchestratorV2:
             intent_analysis=intent_analysis,
             chat_history=chat_history,
         )
-        support_flow_payloads = {}
-        if support_flow_result.handled:
-            support_flow_payloads = self.support_flow_engine.build_orchestrator_payloads(
-                support_flow_result
-            )
+        support_flow_payloads = (
+            self.support_flow_engine.build_orchestrator_payloads(flow_result)
+            if flow_result.handled
+            else {}
+        )
+        if support_flow_payloads:
             conversation_control.update(
-                support_flow_payloads.get("conversation_control_updates", {})
+                support_flow_payloads.get("conversation_control_updates", {}) or {}
             )
             conversation_frame.update(
-                support_flow_payloads.get("conversation_frame_updates", {})
+                support_flow_payloads.get("conversation_frame_updates", {}) or {}
             )
 
         effective_family_id = family_id or (active_profile.get("family_id") if active_profile else None)
@@ -391,6 +2898,7 @@ class NeuroGuiaOrchestratorV2:
             "care_context": conversation_frame.get("care_context"),
             "conversation_frame": conversation_frame,
             "conversation_control": conversation_control,
+            "support_flow_response_plan": support_flow_payloads.get("support_flow_response_plan", {}),
             "domain_shift_detected": conversation_frame.get("domain_shift_detected", False),
             "is_followup_acceptance": conversation_control.get("turn_type") == "followup_acceptance",
             "context_override": context_override,
@@ -660,10 +3168,9 @@ class NeuroGuiaOrchestratorV2:
         llm_curated_payload = None
         llm_should_run = False
 
-        if not support_flow_payloads:
-            llm_should_run = bool(
-                fallback_payload.get("use_llm") or llm_policy.get("should_use_llm")
-            )
+        llm_should_run = bool(
+            fallback_payload.get("use_llm") or llm_policy.get("should_use_llm")
+        )
 
         if llm_should_run:
             llm_request_payload = self.llm_gateway.build_request(
@@ -698,7 +3205,9 @@ class NeuroGuiaOrchestratorV2:
             )
 
             if llm_request_payload.get("allowed"):
-                if use_llm_stub:
+                if support_flow_payloads and use_llm_stub:
+                    llm_result = None
+                elif use_llm_stub:
                     llm_result = self.llm_gateway.build_local_stub_response(
                         llm_request_payload.get("request_payload") or {}
                     )
@@ -712,30 +3221,55 @@ class NeuroGuiaOrchestratorV2:
                             llm_request_payload.get("request_payload") or {}
                         )
 
-                llm_curated_payload = self.response_curator.curate(
-                    llm_result=llm_result,
-                    fallback_payload={
-                        **fallback_payload,
-                        "use_llm": True,
-                        "fallback_reason": llm_policy.get("reason") or fallback_payload.get("fallback_reason"),
-                        "should_learn_if_good": fallback_payload.get("should_learn_if_good", False),
-                    },
-                    decision_payload=decision_payload,
-                    stage_result=stage_result,
-                    state_analysis=state_analysis,
-                    category_analysis=category_analysis,
-                    intent_analysis=intent_analysis,
-                    routine_payload=routine_payload,
-                    conversation_control=conversation_control,
-                    conversation_frame=conversation_frame,
-                    chat_history=chat_history,
-                )
+                if not support_flow_payloads and llm_result is not None:
+                    llm_curated_payload = self.response_curator.curate(
+                        llm_result=llm_result,
+                        fallback_payload={
+                            **fallback_payload,
+                            "use_llm": True,
+                            "fallback_reason": llm_policy.get("reason") or fallback_payload.get("fallback_reason"),
+                            "should_learn_if_good": fallback_payload.get("should_learn_if_good", False),
+                        },
+                        decision_payload=decision_payload,
+                        stage_result=stage_result,
+                        state_analysis=state_analysis,
+                        category_analysis=category_analysis,
+                        intent_analysis=intent_analysis,
+                        routine_payload=routine_payload,
+                        conversation_control=conversation_control,
+                        conversation_frame=conversation_frame,
+                        chat_history=chat_history,
+                    )
 
         # -----------------------------------------------------
         # 15) RESPUESTA FINAL
         # -----------------------------------------------------
         if support_flow_payloads:
             response_package = dict(support_flow_payloads.get("response_package", {}))
+            llm_curated_payload = self.response_curator.humanize_support_flow_response(
+                response_package=response_package,
+                support_flow_response_plan=support_flow_payloads.get("support_flow_response_plan", {}),
+                llm_result=llm_result,
+                conversation_control=conversation_control,
+                conversation_frame=conversation_frame,
+                chat_history=chat_history,
+            )
+            humanized_text = str(llm_curated_payload.get("curated_response_text") or "").strip()
+            if humanized_text:
+                response_package["response"] = humanized_text
+                response_package["text"] = humanized_text
+            response_metadata = dict(response_package.get("response_metadata", {}) or {})
+            response_metadata.update(
+                {
+                    "humanization_provider": llm_curated_payload.get("source_provider"),
+                    "humanization_used_llm": bool(llm_curated_payload.get("used_llm", False)),
+                    "humanization_used_local_humanizer": bool(
+                        llm_curated_payload.get("used_local_humanizer", False)
+                    ),
+                    "humanization_notes": list(llm_curated_payload.get("curation_notes", []) or []),
+                }
+            )
+            response_package["response_metadata"] = response_metadata
         else:
             rb_input = self._build_response_builder_input(
                 decision_payload=decision_payload,
@@ -1021,6 +3555,395 @@ class NeuroGuiaOrchestratorV2:
             "conversation_curation_result": conversation_curation_result,
             "session_scope_id": session_scope_id,
             "response_package": response_package,
+        }
+
+    def _build_stable_demo_process_result(
+        self,
+        stable_demo: Dict[str, Any],
+        message: str,
+        effective_message: str,
+        previous_frame: Dict[str, Any],
+        context_override: Dict[str, Any],
+        unit_context: Dict[str, Any],
+        user_context_payload: Dict[str, Any],
+        user_context_store_result: Dict[str, Any],
+        conversation_curation_result: Dict[str, Any],
+        session_scope_id: Optional[str],
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+        chat_history_size: int = 0,
+    ) -> Dict[str, Any]:
+        chat_history = chat_history or []
+        base_response_text = str(stable_demo.get("response_text") or "").strip()
+        response_text = base_response_text
+        route_id = str(stable_demo.get("route_id") or "").strip()
+        support_subject = str(stable_demo.get("support_subject") or "unknown").strip()
+        support_mode = str(stable_demo.get("support_mode") or "supportive").strip()
+        step_index = int(stable_demo.get("step_index", 0) or 0)
+        intervention_id = str(stable_demo.get("intervention_id") or "").strip() or None
+        used_interventions = dict(stable_demo.get("used_interventions") or {})
+        used_interventions_last_10 = dict(stable_demo.get("used_interventions_last_10") or {})
+        conversation_frame = dict(stable_demo.get("conversation_frame") or {})
+        support_state_from_frame = dict(conversation_frame.get("support_flow_state") or {})
+        exhausted_strategies = dict(
+            stable_demo.get("exhausted_strategies")
+            or conversation_frame.get("exhausted_strategies")
+            or support_state_from_frame.get("exhausted_strategies")
+            or {}
+        )
+        behavioral_plan = dict(stable_demo.get("behavioral_plan") or conversation_frame.get("behavioral_plan") or {})
+        if behavioral_plan:
+            behavioral_plan["base_guidance"] = base_response_text
+            behavioral_plan["recent_user_message"] = message
+            if not behavioral_plan.get("recent_context"):
+                behavioral_plan["recent_context"] = _stable_demo_recent_context(chat_history)
+        conversation_frame["context_override"] = dict(
+            context_override
+            or self._empty_context_override(
+                message=message,
+                effective_message=effective_message,
+            )
+        )
+        conversation_frame["effective_message"] = effective_message
+        conversation_frame = self._normalize_conversation_frame(conversation_frame)
+        conversation_frame["route_id"] = route_id
+        conversation_frame["support_subject"] = support_subject
+        conversation_frame["support_mode"] = support_mode
+        conversation_frame["stable_demo_routing_key"] = f"{route_id}:{support_subject}:{support_mode}"
+        conversation_frame["stable_demo_route_id"] = route_id
+        conversation_frame["step_index"] = step_index
+        conversation_frame["stable_demo_step_index"] = step_index
+        conversation_frame["stable_demo_intervention_id"] = intervention_id
+        conversation_frame["last_intervention_id"] = intervention_id
+        conversation_frame["used_interventions"] = used_interventions
+        conversation_frame["used_interventions_last_10"] = used_interventions_last_10
+        conversation_frame["exhausted_strategies"] = exhausted_strategies
+        conversation_frame["direct_turn_response"] = bool(stable_demo.get("direct_turn_response", False))
+        conversation_frame["overthinking_block_turns"] = int(stable_demo.get("overthinking_block_turns", 0) or 0)
+        conversation_frame["overthinking_block_active"] = bool(stable_demo.get("overthinking_block_active", False))
+        conversation_frame["stable_demo"] = True
+        if behavioral_plan:
+            conversation_frame["behavioral_plan"] = behavioral_plan
+
+        writer_status = self.llm_gateway.get_openai_writer_status()
+        llm_writer_requested = bool(behavioral_plan)
+        llm_writer_used = False
+        llm_provider = str(writer_status.get("provider") or "openai").strip() or "openai"
+        llm_block_reason = None
+        llm_curator_status = "not_requested" if not llm_writer_requested else "not_run"
+        model_used = str(writer_status.get("model") or "").strip() or None
+        response_source = "deterministic"
+
+        llm_request_payload = {
+            "allowed": False,
+            "reason": "stable_demo_no_behavioral_plan" if not behavioral_plan else (
+                writer_status.get("block_reason") or "stable_demo_writer_disabled"
+            ),
+            "request_payload": None,
+        }
+        llm_result = None
+        llm_curated_payload = None
+        if llm_writer_requested:
+            if bool(writer_status.get("enabled")):
+                llm_request_payload = {
+                    "allowed": True,
+                    "reason": "stable_demo_behavioral_writer",
+                    "request_payload": {"behavioral_plan": behavioral_plan},
+                }
+                llm_result = self.llm_gateway.rewrite_from_behavioral_plan(behavioral_plan)
+                llm_provider = str(
+                    (llm_result or {}).get("provider")
+                    or writer_status.get("provider")
+                    or "openai"
+                ).strip() or "openai"
+                model_used = str(
+                    (llm_result or {}).get("model")
+                    or writer_status.get("model")
+                    or ""
+                ).strip() or None
+                llm_curated_payload = self.response_curator.curate_behavioral_plan_response(
+                    llm_result=llm_result,
+                    behavioral_plan=behavioral_plan,
+                )
+                llm_curator_status = "approved" if bool((llm_curated_payload or {}).get("approved")) else "rejected"
+                curated_text = str(
+                    (llm_curated_payload or {}).get("curated_response_text")
+                    or ""
+                ).strip()
+                if bool((llm_curated_payload or {}).get("approved")) and curated_text:
+                    response_text = curated_text
+                    llm_writer_used = True
+                    response_source = "llm_writer"
+                else:
+                    response_source = "fallback_deterministic"
+                    llm_block_reason = _stable_demo_llm_block_reason(
+                        llm_result=llm_result,
+                        llm_curated_payload=llm_curated_payload,
+                        default_reason="curator_rejected",
+                    )
+            else:
+                llm_block_reason = str(
+                    writer_status.get("block_reason") or "missing_openai_key_or_disabled"
+                )
+                llm_curator_status = "not_run"
+
+        if behavioral_plan:
+            behavioral_plan["final_response_text"] = response_text
+            conversation_frame["behavioral_plan"] = behavioral_plan
+            support_state = dict(conversation_frame.get("support_flow_state") or {})
+            support_state["behavioral_plan"] = behavioral_plan
+            conversation_frame["support_flow_state"] = support_state
+        conversation_frame["last_guided_action"] = response_text
+        conversation_frame["last_action_instruction"] = base_response_text
+        conversation_frame["llm_writer_requested"] = llm_writer_requested
+        conversation_frame["llm_writer_used"] = llm_writer_used
+        conversation_frame["llm_provider"] = llm_provider
+        conversation_frame["llm_block_reason"] = llm_block_reason
+        conversation_frame["llm_curator_status"] = llm_curator_status
+        conversation_frame["model_used"] = model_used
+        conversation_frame["response_source"] = response_source
+
+        conversation_control = {
+            "domain": conversation_frame.get("conversation_domain"),
+            "route_id": route_id,
+            "support_subject": support_subject,
+            "support_mode": support_mode,
+            "stable_demo_routing_key": conversation_frame.get("stable_demo_routing_key"),
+            "stable_demo_route_id": route_id,
+            "step_index": step_index,
+            "intervention_id": intervention_id,
+            "used_interventions": used_interventions,
+            "used_interventions_last_10": used_interventions_last_10,
+            "exhausted_strategies": exhausted_strategies,
+            "direct_turn_response": conversation_frame.get("direct_turn_response", False),
+            "overthinking_block_turns": conversation_frame.get("overthinking_block_turns", 0),
+            "overthinking_block_active": conversation_frame.get("overthinking_block_active", False),
+            "stable_demo": True,
+            "turn_type": conversation_frame.get("turn_type") or stable_demo.get("turn_family"),
+            "turn_family": conversation_frame.get("turn_family") or stable_demo.get("turn_family"),
+            "phase": conversation_frame.get("conversation_phase"),
+            "speaker_role": conversation_frame.get("speaker_role"),
+            "source_message": message,
+            "effective_message": effective_message,
+            "chat_history_size": chat_history_size,
+            "context_override": conversation_frame.get("context_override"),
+            "intervention_level": conversation_frame.get("intervention_level", 1),
+            "last_guided_action": response_text,
+            "last_action_instruction": base_response_text,
+            "last_action_type": "stable_demo_step",
+            "phase_progression_reason": "stable_demo_counter",
+            "domain_shift": conversation_frame.get("domain_shift_analysis", {}),
+            "conversational_repair": conversation_frame.get("conversational_repair", False),
+            "repair_type": conversation_frame.get("repair_type"),
+            "llm_writer_requested": llm_writer_requested,
+            "llm_writer_used": llm_writer_used,
+            "llm_provider": llm_provider,
+            "llm_block_reason": llm_block_reason,
+            "llm_curator_status": llm_curator_status,
+            "model_used": model_used,
+            "response_source": response_source,
+        }
+
+        stage_result = {
+            "stage": "stable_demo",
+            "conversation_domain": conversation_frame.get("conversation_domain"),
+            "conversation_phase": conversation_frame.get("conversation_phase"),
+            "route_id": route_id,
+            "support_subject": support_subject,
+            "support_mode": support_mode,
+            "stable_demo_routing_key": conversation_frame.get("stable_demo_routing_key"),
+            "step_index": step_index,
+            "intervention_id": intervention_id,
+            "turn_type": conversation_control.get("turn_type"),
+            "turn_family": conversation_control.get("turn_family"),
+            "intervention_level": 1,
+            "phase_progression_reason": "stable_demo_counter",
+            "should_close_with_followup": False,
+        }
+        response_goal = {
+            "goal": STABLE_DEMO_GOALS.get(route_id, "stable_demo_support"),
+            "route_id": route_id,
+            "support_subject": support_subject,
+            "support_mode": support_mode,
+            "stable_demo_routing_key": conversation_frame.get("stable_demo_routing_key"),
+            "step_index": step_index,
+            "intervention_id": intervention_id,
+            "response_shape": "direct_deterministic_step",
+            "intervention_level": 1,
+            "strategy_signature": f"stable_demo:{route_id}:{intervention_id or step_index}",
+            "selected_microaction": base_response_text,
+        }
+        decision_payload = {
+            "decision_mode": "stable_demo",
+            "selected_strategy": route_id,
+            "selected_microaction": base_response_text,
+            "selected_routine_type": None,
+            "response_goal": response_goal,
+            "response_plan": dict(response_goal),
+        }
+        response_package = {
+            "mode": "system_generated",
+            "response": response_text,
+            "text": response_text,
+            "suggested_microaction": base_response_text,
+            "route_id": route_id,
+            "step_index": step_index,
+            "intervention_id": intervention_id,
+            "stable_demo": True,
+            "llm_writer_requested": llm_writer_requested,
+            "llm_writer_used": llm_writer_used,
+            "llm_provider": llm_provider,
+            "llm_block_reason": llm_block_reason,
+            "llm_curator_status": llm_curator_status,
+            "model_used": model_used,
+            "response_source": response_source,
+            "response_metadata": {
+                "source": "stable_demo_response",
+                "response_source": response_source,
+                "route_id": route_id,
+                "support_subject": support_subject,
+                "support_mode": support_mode,
+                "stable_demo_routing_key": conversation_frame.get("stable_demo_routing_key"),
+                "step_index": step_index,
+                "intervention_id": intervention_id,
+                "used_interventions": used_interventions,
+                "used_interventions_last_10": used_interventions_last_10,
+                "exhausted_strategies": exhausted_strategies,
+                "conversational_repair": conversation_frame.get("conversational_repair", False),
+                "repair_type": conversation_frame.get("repair_type"),
+                "repair_notes": list(conversation_frame.get("repair_notes", []) or []),
+                "direct_turn_response": conversation_frame.get("direct_turn_response", False),
+                "overthinking_block_turns": conversation_frame.get("overthinking_block_turns", 0),
+                "overthinking_block_active": conversation_frame.get("overthinking_block_active", False),
+                "llm_writer_requested": llm_writer_requested,
+                "llm_writer_used": llm_writer_used,
+                "llm_provider": llm_provider,
+                "llm_block_reason": llm_block_reason,
+                "llm_curator_status": llm_curator_status,
+                "model_used": model_used,
+                "openai_writer_status": {
+                    "enabled": bool(writer_status.get("enabled")),
+                    "env_enabled": bool(writer_status.get("env_enabled")),
+                    "use_openai_llm_raw": writer_status.get("use_openai_llm_raw"),
+                    "has_api_key": bool(writer_status.get("has_api_key")),
+                    "model": writer_status.get("model"),
+                },
+                "used_llm": bool((llm_curated_payload or {}).get("used_llm", False)),
+                "used_curator": bool(llm_curated_payload),
+                "llm_writer_provider": (llm_curated_payload or {}).get("source_provider"),
+                "llm_writer_notes": list((llm_curated_payload or {}).get("curation_notes", []) or []),
+                "deterministic_base_guidance": base_response_text,
+                "behavioral_plan": behavioral_plan,
+                "bypassed_support_flow_engine": True,
+                "bypassed_response_curator": not bool(llm_curated_payload),
+                "bypassed_fallback": True,
+            },
+        }
+        category_analysis = {
+            "detected_category": conversation_frame.get("conversation_domain"),
+            "confidence": 1.0,
+            "route_id": route_id,
+            "source": "stable_demo_response",
+        }
+        state_analysis = {
+            "primary_state": route_id,
+            "secondary_states": [],
+            "detected_states": [],
+            "followup_needed": False,
+            "source": "stable_demo_response",
+        }
+        intent_analysis = {
+            "detected_intent": conversation_control.get("turn_family") or "stable_demo",
+            "confidence": 1.0,
+            "source": "stable_demo_response",
+        }
+        confidence_payload = {
+            "overall_confidence": 1.0,
+            "source": "stable_demo_response",
+        }
+        fallback_payload = {
+            "use_llm": bool(llm_writer_requested and writer_status.get("enabled")),
+            "fallback_reason": "stable_demo_bypass",
+            "should_learn_if_good": False,
+            "response_source": response_source,
+            "llm_writer_requested": llm_writer_requested,
+            "llm_writer_used": llm_writer_used,
+            "llm_provider": llm_provider,
+            "llm_block_reason": llm_block_reason,
+            "llm_curator_status": llm_curator_status,
+            "model_used": model_used,
+        }
+        llm_policy = {
+            "should_use_llm": bool(llm_writer_requested and writer_status.get("enabled")),
+            "reason": "stable_demo_behavioral_writer" if behavioral_plan else "stable_demo_bypass",
+            "response_source": response_source,
+            "llm_writer_requested": llm_writer_requested,
+            "llm_writer_used": llm_writer_used,
+            "llm_provider": llm_provider,
+            "llm_block_reason": llm_block_reason,
+            "llm_curator_status": llm_curator_status,
+            "model_used": model_used,
+        }
+        conversational_intent = {
+            "intent": "stable_demo_direct_response",
+            "route_id": route_id,
+            "step_index": step_index,
+        }
+        support_plan = self._empty_support_plan()
+        exceptionality_analysis = self._empty_exceptionality_analysis()
+        user_context_payload = {
+            **(user_context_payload or {}),
+            "available": False,
+            "reason": "stable_demo_bypass",
+            "session_scope_id": session_scope_id,
+        }
+        user_context_store_result = {
+            **(user_context_store_result or {}),
+            "stored": False,
+            "reason": "stable_demo_bypass",
+        }
+        conversation_curation_result = {
+            **(conversation_curation_result or {}),
+            "stored": False,
+            "reason": "stable_demo_bypass",
+            "curation_id": None,
+        }
+
+        return {
+            "case_id": None,
+            "stored_response_id": None,
+            "curated_llm_response_id": None,
+            "learning_payload": None,
+            "learning_store_result": None,
+            "unit_context": unit_context,
+            "active_profile": None,
+            "exceptionality_analysis": exceptionality_analysis,
+            "support_plan": support_plan,
+            "conversation_control": conversation_control,
+            "conversation_frame": conversation_frame,
+            "conversational_intent": conversational_intent,
+            "expert_adaptation_plan": {},
+            "state_analysis": state_analysis,
+            "category_analysis": category_analysis,
+            "intent_analysis": intent_analysis,
+            "memory_summary": {},
+            "memory_payload": {},
+            "user_context_payload": user_context_payload,
+            "user_context_store_result": user_context_store_result,
+            "response_memory_payload": {},
+            "stage_result": stage_result,
+            "stage_hints": {},
+            "routine_payload": {},
+            "confidence_payload": confidence_payload,
+            "decision_payload": decision_payload,
+            "fallback_payload": fallback_payload,
+            "llm_policy": llm_policy,
+            "llm_request_payload": llm_request_payload,
+            "llm_result": llm_result,
+            "llm_curated_payload": llm_curated_payload,
+            "conversation_curation_result": conversation_curation_result,
+            "session_scope_id": session_scope_id,
+            "response_package": response_package,
+            "previous_frame": previous_frame,
         }
 
     # =========================================================
@@ -2484,6 +5407,10 @@ class NeuroGuiaOrchestratorV2:
         normalized["domain_shift_analysis"] = normalized.get("domain_shift_analysis", {}) or {}
         normalized["turn_family"] = normalized.get("turn_family") or "new_request"
         normalized["recent_strategy_history"] = list(normalized.get("recent_strategy_history") or [])
+        normalized["used_interventions_last_10"] = dict(normalized.get("used_interventions_last_10") or {})
+        normalized["support_subject"] = normalized.get("support_subject") or "unknown"
+        normalized["support_mode"] = normalized.get("support_mode") or "supportive"
+        normalized["stable_demo_routing_key"] = normalized.get("stable_demo_routing_key")
         normalized["context_override"] = normalized.get("context_override") or self._empty_context_override(
             message=normalized.get("source_message") or "",
             effective_message=normalized.get("effective_message") or normalized.get("source_message") or "",

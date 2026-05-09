@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import base64
@@ -5,6 +6,7 @@ import html
 import os
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -496,7 +498,8 @@ st.markdown(
     }
 
     .stButton > button,
-    div[data-testid="stFormSubmitButton"] button {
+    div[data-testid="stFormSubmitButton"] button,
+    div[data-testid="stDownloadButton"] button {
         border-radius: 18px !important;
         border: 1px solid #e6d6c9 !important;
         background: linear-gradient(180deg, #fffaf6 0%, #f7ece4 100%) !important;
@@ -515,7 +518,8 @@ st.markdown(
     }
 
     .stButton > button:hover,
-    div[data-testid="stFormSubmitButton"] button:hover {
+    div[data-testid="stFormSubmitButton"] button:hover,
+    div[data-testid="stDownloadButton"] button:hover {
         border-color: #d9b9a9 !important;
         color: var(--ng-primary) !important;
     }
@@ -676,8 +680,82 @@ st.markdown(
 # ---------------------------------------------------------
 # BOOTSTRAP
 # ---------------------------------------------------------
+STREAMLIT_SECRET_ENV_KEYS = (
+    "OPENAI_API_KEY",
+    "USE_OPENAI_LLM",
+    "OPENAI_MODEL",
+    "OPENAI_TIMEOUT_SECONDS",
+    "DEBUG_MODE",
+)
+
+
+def _get_streamlit_secret_value(key: str) -> Optional[Any]:
+    try:
+        secrets = st.secrets
+    except Exception:
+        return None
+
+    try:
+        if key in secrets:
+            return secrets[key]
+    except Exception:
+        pass
+
+    nested_candidates = {
+        key,
+        key.lower(),
+        key.replace("OPENAI_", "").lower(),
+    }
+    for section_name in ("openai", "OPENAI", "llm", "LLM", "debug", "DEBUG"):
+        try:
+            section = secrets.get(section_name)
+        except Exception:
+            section = None
+        if not hasattr(section, "get"):
+            continue
+        for candidate in nested_candidates:
+            try:
+                value = section.get(candidate)
+            except Exception:
+                value = None
+            if value not in {None, ""}:
+                return value
+    return None
+
+
+def _has_streamlit_secret_value(value: Any) -> bool:
+    return value is not None and str(value).strip() != ""
+
+
+def sync_streamlit_secrets_to_env() -> Dict[str, Any]:
+    synced: List[str] = []
+    present: Dict[str, bool] = {}
+    for key in STREAMLIT_SECRET_ENV_KEYS:
+        value = _get_streamlit_secret_value(key)
+        present[key] = _has_streamlit_secret_value(value)
+        if not present[key]:
+            continue
+        os.environ[key] = str(value).strip()
+        synced.append(key)
+    return {
+        "synced_keys": synced,
+        "present": present,
+        "has_openai_api_key": bool(str(os.getenv("OPENAI_API_KEY", "") or "").strip()),
+        "use_openai_llm_raw": str(os.getenv("USE_OPENAI_LLM", "") or "").strip(),
+        "openai_model": str(os.getenv("OPENAI_MODEL", "") or "").strip(),
+    }
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    raw_value = str(os.getenv(name, "") or "").strip().lower()
+    if not raw_value:
+        return default
+    return raw_value in {"1", "true", "yes", "y", "on", "si", "sí", "enabled"}
+
+
 def bootstrap_environment(env_path: str) -> None:
     load_env_file(env_path)
+    st.session_state["streamlit_secrets_sync"] = sync_streamlit_secrets_to_env()
 
 
 def bootstrap_database(db_backend: str, db_path: str) -> None:
@@ -716,6 +794,7 @@ def init_session_state() -> None:
     st.session_state.setdefault("last_result", None)
     st.session_state.setdefault("auto_store_system_response", False)
     st.session_state.setdefault("auto_store_curated_llm_response", True)
+    st.session_state.setdefault("show_response_debug", env_flag("DEBUG_MODE", False))
     st.session_state.setdefault(
         "use_llm_stub",
         False,
@@ -821,6 +900,30 @@ def build_history_hint() -> List[Dict[str, Any]]:
     ]
 
 
+def build_conversation_export(history: List[Dict[str, Any]]) -> str:
+    exported_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [
+        "neuroGuIA - conversacion",
+        f"Fecha: {exported_at}",
+        "",
+    ]
+
+    for index, item in enumerate(history or [], start=1):
+        user_text = str(item.get("user") or "").strip()
+        assistant_text = str(item.get("assistant") or "").strip()
+        lines.append(f"Turno {index}")
+        lines.append(f"Usuario: {user_text}")
+        lines.append(f"neuroGuIA: {assistant_text}")
+        lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def conversation_export_filename() -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    return f"neuroguia_conversacion_{stamp}.txt"
+
+
 def clear_visible_conversation() -> None:
     st.session_state.chat_history = []
     st.session_state.last_result = None
@@ -881,7 +984,7 @@ def render_app_header(show_full_logo: bool = True) -> None:
     del show_full_logo
     icon_logo_uri = _image_to_data_uri(_find_icon_logo())
     logo_html = (
-        f'<img src="{icon_logo_uri}" alt="Logo de neuroGuIA" />'
+        f'<img src="{icon_logo_uri}" alt="Logo de neuroguIA" />'
         if icon_logo_uri
         else '<span class="ng-brand-fallback" aria-hidden="true">🧠</span>'
     )
@@ -891,7 +994,7 @@ def render_app_header(show_full_logo: bool = True) -> None:
             <div class="ng-header-inner">
                 <div class="ng-brand-line">
                     <div class="ng-brand-logo">{logo_html}</div>
-                    <p class="ng-brand-title">neuroGuIA</p>
+                    <p class="ng-brand-title">neuroguIA</p>
                 </div>
                 <p class="ng-header-subtitle">Un espacio de apoyo calido, claro y adaptativo para acompanarte paso a paso.</p>
                 <p class="ng-header-subtitle">Acompanamiento inteligente y humano para momentos dificiles, organizacion, prevencion y apoyo emocional.</p>
@@ -916,7 +1019,7 @@ def render_app_header(show_full_logo: bool = True) -> None:
             unsafe_allow_html=True,
         )
 
-    st.markdown('<p class="ng-brand-title">neuroGuIA</p>', unsafe_allow_html=True)
+    st.markdown('<p class="ng-brand-title">neuroguIA</p>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
     st.markdown(
         """
@@ -981,7 +1084,7 @@ def render_context_sidebar(
     st.markdown('<div class="ng-card ng-side-card">', unsafe_allow_html=True)
     if full_logo_uri:
         st.markdown(
-            f'<div class="ng-logo-full"><img class="ng-logo-full-image" src="{full_logo_uri}" alt="Logo completo de neuroGuIA" /></div>',
+            f'<div class="ng-logo-full"><img class="ng-logo-full-image" src="{full_logo_uri}" alt="Logo completo de neuroguIA" /></div>',
             unsafe_allow_html=True,
         )
     else:
@@ -1086,6 +1189,15 @@ def render_chat_history() -> None:
 
     html_parts.append("</div></div>")
     st.markdown("".join(html_parts), unsafe_allow_html=True)
+    st.download_button(
+        "Descargar conversación",
+        data=build_conversation_export(history),
+        file_name=conversation_export_filename(),
+        mime="text/plain",
+        key="download_conversation_main",
+        disabled=not bool(history),
+        use_container_width=True,
+    )
     return
 
     st.markdown('<div class="ng-conversation-block">', unsafe_allow_html=True)
@@ -1129,7 +1241,7 @@ def render_chat_history() -> None:
         st.markdown(
             f"""
             <div class="ng-message ng-message-assistant">
-                <span class="ng-message-role">neuroGuIA</span>
+                <span class="ng-message-role">neuroguIA</span>
                 {assistant_text}
             </div>
             """,
@@ -1219,47 +1331,40 @@ def render_quick_help() -> None:
     )
 
     row1 = st.columns(3, gap="small")
-    row2 = st.columns(3, gap="small")
+    row2 = st.columns(2, gap="small")
 
     with row1[0]:
         st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("Me siento muy ansiosa/o", key="quick_anxiety"):
-            process_user_message("Me siento muy ansiosa/o y no se como calmarme")
+        if st.button("😰 Me siento muy ansiosa/o", key="quick_anxiety"):
+            process_user_message("😰 Me siento muy ansiosa/o y no se como calmarme")
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     with row1[1]:
         st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("Esta ocurriendo una crisis", key="quick_crisis"):
-            process_user_message("Esta ocurriendo una crisis y necesito ayuda para manejarla")
+        if st.button("😫 Esta ocurriendo una crisis", key="quick_crisis"):
+            process_user_message("😫 Esta ocurriendo una crisis y necesito ayuda para manejarla")
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     with row1[2]:
         st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("Hay problemas de sueno", key="quick_sleep"):
-            process_user_message("Hay problemas de sueno y eso esta afectando mucho")
+        if st.button("🥱 Hay problemas de sue\u00f1o", key="quick_sleep"):
+            process_user_message("🥱 Hay problemas de sueño y eso está afectando mucho")
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     with row2[0]:
         st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("No puedo organizarme", key="quick_organize"):
-            process_user_message("No puedo organizarme ni empezar lo que tengo pendiente")
+        if st.button("📚 No puedo organizarme", key="quick_organize"):
+            process_user_message("📚 No puedo organizarme ni empezar lo que tengo pendiente")
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     with row2[1]:
         st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("Limpiar conversacion", key="quick_clear"):
+        if st.button("🧼 Limpiar conversacion", key="quick_clear"):
             clear_visible_conversation()
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with row2[2]:
-        st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("Empezar de nuevo", key="quick_restart"):
-            restart_temporary_session()
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1278,35 +1383,35 @@ def render_quick_help() -> None:
 
     with row1[0]:
         st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("Me siento muy ansiosa/o", key="quick_anxiety"):
-            process_user_message("Me siento muy ansiosa/o y no sé cómo calmarme")
+        if st.button("😰 Me siento muy ansiosa/o", key="quick_anxiety"):
+            process_user_message("😰 Me siento muy ansiosa/o y no sé cómo calmarme")
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
     with row1[1]:
         st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("Está ocurriendo una crisis", key="quick_crisis"):
-            process_user_message("Está ocurriendo una crisis y necesito ayuda para manejarla")
+        if st.button("😫 Está ocurriendo una crisis", key="quick_crisis"):
+            process_user_message("😫 Está ocurriendo una crisis y necesito ayuda para manejarla")
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
     with row1[2]:
         st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("Hay problemas de sueño", key="quick_sleep"):
-            process_user_message("Hay problemas de sueño y eso está afectando mucho")
+        if st.button("🥱 Hay problemas de sueño", key="quick_sleep"):
+            process_user_message("🥱 Hay problemas de sueño y eso está afectando mucho")
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
     with row2[0]:
         st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("No puedo organizarme", key="quick_organize"):
-            process_user_message("No puedo organizarme ni empezar lo que tengo pendiente")
+        if st.button("📚 No puedo organizarme", key="quick_organize"):
+            process_user_message("📚 No puedo organizarme ni empezar lo que tengo pendiente")
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
     with row2[1]:
         st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-        if st.button("Limpiar conversación", key="quick_clear"):
+        if st.button("🧼 Limpiar conversación", key="quick_clear"):
             st.session_state.chat_history = []
             st.session_state.last_result = None
             st.rerun()
@@ -1333,38 +1438,32 @@ def render_quick_help_sidebar() -> None:
     )
 
     st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("Me siento muy ansiosa/o", key="quick_anxiety_sidebar", use_container_width=True):
-        process_user_message("Me siento muy ansiosa/o y no se como calmarme")
+    if st.button("😰 Me siento muy ansiosa/o", key="quick_anxiety_sidebar", use_container_width=True):
+        process_user_message("😰 Me siento muy ansiosa/o y no se como calmarme")
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("Esta ocurriendo una crisis", key="quick_crisis_sidebar", use_container_width=True):
-        process_user_message("Esta ocurriendo una crisis y necesito ayuda para manejarla")
+    if st.button("😫 Esta ocurriendo una crisis", key="quick_crisis_sidebar", use_container_width=True):
+        process_user_message("😫 Esta ocurriendo una crisis y necesito ayuda para manejarla")
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("Hay problemas de sueno", key="quick_sleep_sidebar", use_container_width=True):
-        process_user_message("Hay problemas de sueno y eso esta afectando mucho")
+    if st.button("🥱 Hay problemas de sue\u00f1o", key="quick_sleep_sidebar", use_container_width=True):
+        process_user_message("🥱 Hay problemas de sueño y eso está afectando mucho")
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("No puedo organizarme", key="quick_organize_sidebar", use_container_width=True):
-        process_user_message("No puedo organizarme ni empezar lo que tengo pendiente")
+    if st.button("📚 No puedo organizarme", key="quick_organize_sidebar", use_container_width=True):
+        process_user_message("📚 No puedo organizarme ni empezar lo que tengo pendiente")
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("Limpiar conversacion", key="quick_clear_sidebar", use_container_width=True):
+    if st.button("🧼 Limpiar conversacion", key="quick_clear_sidebar", use_container_width=True):
         clear_visible_conversation()
-        st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("Empezar de nuevo", key="quick_restart_sidebar", use_container_width=True):
-        restart_temporary_session()
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1379,31 +1478,31 @@ def render_quick_help_sidebar() -> None:
     )
 
     st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("Me siento muy ansiosa/o", key="quick_anxiety_sidebar", use_container_width=True):
-        process_user_message("Me siento muy ansiosa/o y no sé cómo calmarme")
+    if st.button("😰 Me siento muy ansiosa/o", key="quick_anxiety_sidebar", use_container_width=True):
+        process_user_message("😰 Me siento muy ansiosa/o y no sé cómo calmarme")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("Está ocurriendo una crisis", key="quick_crisis_sidebar", use_container_width=True):
-        process_user_message("Está ocurriendo una crisis y necesito ayuda para manejarla")
+    if st.button("😫 Está ocurriendo una crisis", key="quick_crisis_sidebar", use_container_width=True):
+        process_user_message("😫 Está ocurriendo una crisis y necesito ayuda para manejarla")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("Hay problemas de sueño", key="quick_sleep_sidebar", use_container_width=True):
-        process_user_message("Hay problemas de sueño y eso está afectando mucho")
+    if st.button("🥱 Hay problemas de sueño", key="quick_sleep_sidebar", use_container_width=True):
+        process_user_message("🥱 Hay problemas de sueño y eso está afectando mucho")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("No puedo organizarme", key="quick_organize_sidebar", use_container_width=True):
-        process_user_message("No puedo organizarme ni empezar lo que tengo pendiente")
+    if st.button("📚 No puedo organizarme", key="quick_organize_sidebar", use_container_width=True):
+        process_user_message("📚 No puedo organizarme ni empezar lo que tengo pendiente")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="ng-quick-button">', unsafe_allow_html=True)
-    if st.button("Limpiar conversación", key="quick_clear_sidebar", use_container_width=True):
+    if st.button("🧼 Limpiar conversación", key="quick_clear_sidebar", use_container_width=True):
         st.session_state.chat_history = []
         st.session_state.last_result = None
         st.rerun()
@@ -1418,6 +1517,52 @@ def render_quick_help_sidebar() -> None:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('</div></div>', unsafe_allow_html=True)
+
+
+def render_response_debug_metadata() -> None:
+    result = st.session_state.last_result if isinstance(st.session_state.last_result, dict) else {}
+    show_debug = st.checkbox(
+        "Mostrar diagnóstico",
+        key="show_response_debug",
+    )
+    if not show_debug or not result:
+        return
+
+    response_package = result.get("response_package", {}) or {}
+    response_metadata = response_package.get("response_metadata", {}) or {}
+    conversation_control = result.get("conversation_control", {}) or {}
+    secrets_sync = st.session_state.get("streamlit_secrets_sync", {}) or {}
+    debug_payload = {
+        "response_source": response_package.get("response_source") or response_metadata.get("response_source"),
+        "llm_writer_requested": response_package.get("llm_writer_requested") or response_metadata.get("llm_writer_requested"),
+        "llm_writer_used": response_package.get("llm_writer_used") or response_metadata.get("llm_writer_used"),
+        "llm_provider": response_package.get("llm_provider") or response_metadata.get("llm_provider"),
+        "llm_block_reason": response_package.get("llm_block_reason") or response_metadata.get("llm_block_reason"),
+        "llm_curator_status": response_package.get("llm_curator_status") or response_metadata.get("llm_curator_status"),
+        "llm_writer_notes": response_metadata.get("llm_writer_notes"),
+        "model_used": response_package.get("model_used") or response_metadata.get("model_used"),
+        "route_id": response_metadata.get("route_id"),
+        "support_subject": response_metadata.get("support_subject"),
+        "support_mode": response_metadata.get("support_mode"),
+        "openai_writer_status": response_metadata.get("openai_writer_status"),
+        "streamlit_secrets_sync": {
+            "synced_keys": secrets_sync.get("synced_keys", []),
+            "has_openai_api_key": bool(secrets_sync.get("has_openai_api_key")),
+            "use_openai_llm_raw": secrets_sync.get("use_openai_llm_raw"),
+            "openai_model": secrets_sync.get("openai_model"),
+        },
+        "conversation_control": {
+            "response_source": conversation_control.get("response_source"),
+            "llm_writer_requested": conversation_control.get("llm_writer_requested"),
+            "llm_writer_used": conversation_control.get("llm_writer_used"),
+            "llm_provider": conversation_control.get("llm_provider"),
+            "llm_block_reason": conversation_control.get("llm_block_reason"),
+            "llm_curator_status": conversation_control.get("llm_curator_status"),
+            "model_used": conversation_control.get("model_used"),
+        },
+    }
+    with st.expander("Metadata interna", expanded=False):
+        st.json(debug_payload)
 
 
 def render_context_selector(
@@ -1689,6 +1834,7 @@ def main() -> None:
 
     with col_right:
         render_quick_help_sidebar()
+        render_response_debug_metadata()
 
     st.markdown('</div>', unsafe_allow_html=True)
 
